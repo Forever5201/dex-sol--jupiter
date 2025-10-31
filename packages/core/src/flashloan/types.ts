@@ -76,6 +76,8 @@ export interface AtomicArbitrageConfig {
   useFlashLoan: boolean;
   /** 闪电贷配置 */
   flashLoanConfig?: FlashLoanConfig;
+  /** 预构建的闪电贷指令（用于Jupiter Lend等需要异步构建的协议） */
+  flashLoanInstructions?: FlashLoanResult;
   /** 套利交易指令（在借款和还款之间执行） */
   arbitrageInstructions: TransactionInstruction[];
   /** 钱包公钥 */

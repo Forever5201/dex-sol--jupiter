@@ -1,19 +1,25 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
+use dashmap::DashMap;
+use futures_util::{SinkExt, StreamExt, future::join_all};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{
     tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
 };
+use tracing::{info, warn, error, debug};
+use solana_client::rpc_client::RpcClient;
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
 
 use crate::config::{PoolConfig, ProxyConfig};
 use crate::dex_interface::DexPool;
+use crate::error_tracker::ErrorTracker;
 use crate::metrics::MetricsCollector;
 use crate::pool_factory::PoolFactory;
 use crate::price_cache::{PoolPrice, PriceCache};
@@ -23,14 +29,27 @@ use crate::vault_reader::VaultReader;
 #[allow(dead_code)]
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// 订阅请求类型
+#[derive(Debug, Clone)]
+pub enum SubscriptionRequest {
+    VaultAccount { address: String, pool_name: String },
+}
+
 pub struct WebSocketClient {
     url: String,
     metrics: Arc<MetricsCollector>,
     proxy_config: Option<ProxyConfig>,
     price_cache: Arc<PriceCache>,
+    error_tracker: Arc<ErrorTracker>,
     subscription_map: Arc<Mutex<HashMap<u64, PoolConfig>>>,
+    vault_pending_map: Arc<Mutex<HashMap<u64, String>>>, // 🌐 request_id -> vault地址（等待确认）
+    vault_subscription_map: Arc<Mutex<HashMap<u64, String>>>, // 🌐 subscription_id -> vault地址（已确认）
     vault_reader: Arc<Mutex<VaultReader>>, // 🌐 Vault 读取器
     pool_data_cache: Arc<Mutex<HashMap<String, Vec<u8>>>>, // 🌐 缓存池子数据用于提取 vault
+    last_prices: Arc<DashMap<String, f64>>, // 🔥 Track last prices for change detection (使用DashMap避免锁争用)
+    price_change_threshold: f64, // 🔥 Price change threshold for logging
+    vault_subscription_tx: Arc<Mutex<Option<mpsc::UnboundedSender<SubscriptionRequest>>>>, // 🌐 动态订阅channel
+    rpc_url: Option<String>, // 🚀 RPC URL for proactive vault detection
 }
 
 impl WebSocketClient {
@@ -39,15 +58,25 @@ impl WebSocketClient {
         metrics: Arc<MetricsCollector>,
         proxy_config: Option<ProxyConfig>,
         price_cache: Arc<PriceCache>,
+        error_tracker: Arc<ErrorTracker>,
+        price_change_threshold: f64,
+        rpc_url: Option<String>, // 🚀 新参数：用于主动查询vault
     ) -> Self {
         Self {
             url,
             metrics,
             proxy_config,
             price_cache,
+            error_tracker,
             subscription_map: Arc::new(Mutex::new(HashMap::new())),
+            vault_pending_map: Arc::new(Mutex::new(HashMap::new())), // 🌐 初始化vault等待映射
+            vault_subscription_map: Arc::new(Mutex::new(HashMap::new())), // 🌐 初始化vault订阅映射
             vault_reader: Arc::new(Mutex::new(VaultReader::new())), // 🌐 初始化 VaultReader
             pool_data_cache: Arc::new(Mutex::new(HashMap::new())), // 🌐 初始化池子数据缓存
+            last_prices: Arc::new(DashMap::new()), // 🔥 初始化价格追踪（使用DashMap）
+            price_change_threshold, // 🔥 设置价格变化阈值
+            vault_subscription_tx: Arc::new(Mutex::new(None)), // 🌐 初始化为None，在连接时设置
+            rpc_url, // 🚀 设置RPC URL
         }
     }
     
@@ -126,6 +155,16 @@ impl WebSocketClient {
     ) -> Result<()> {
         let (mut write, mut read) = ws_stream.split();
         
+        // 🌐 创建动态订阅channel
+        let (vault_tx, mut vault_rx) = mpsc::unbounded_channel::<SubscriptionRequest>();
+        {
+            let mut tx_lock = self.vault_subscription_tx.lock().unwrap();
+            *tx_lock = Some(vault_tx);
+        }
+        
+        // 订阅ID计数器（池子使用1-N，vault使用10000+）
+        let mut next_subscription_id = pools.len() as u64 + 10000;
+        
         // Subscribe to all pools
         for (idx, pool) in pools.iter().enumerate() {
             let subscribe_msg = json!({
@@ -146,29 +185,111 @@ impl WebSocketClient {
                 .await
                 .context("Failed to send subscribe message")?;
             
-            println!("📡 Subscribed to {} ({})", pool.name, pool.address);
+            debug!("Subscribed to {} ({})", pool.name, pool.address);
         }
         
-        println!("\n🎯 Waiting for pool updates...\n");
+        info!("Waiting for pool updates from {} pools...", pools.len());
+        info!("🌐 Dynamic vault subscription enabled");
         
-        // Process incoming messages
-        while let Some(message) = read.next().await {
-            match message {
-                Ok(Message::Text(text)) => {
-                    if let Err(e) = self.handle_message(&text, pools).await {
-                        eprintln!("⚠️  Error handling message: {}", e);
+        // 🔥 关键修复：立即主动查询所有池子状态，触发vault订阅
+        // 不等待WebSocket更新（Phoenix冷门池子可能几分钟都没交易）
+        if let Some(rpc_url) = &self.rpc_url {
+            let rpc_client = Arc::new(RpcClient::new_with_timeout(
+                rpc_url.clone(),
+                Duration::from_secs(5)
+            ));
+            
+            // 在后台异步执行，不阻塞WebSocket处理
+            tokio::spawn({
+                let self_clone = self.clone_for_proactive_fetch();
+                let pools_clone = pools.to_vec();
+                async move {
+                    // 等待1秒让WebSocket订阅完全建立
+                    sleep(Duration::from_millis(1000)).await;
+                    
+                    if let Err(e) = self_clone.proactively_trigger_vault_subscriptions(
+                        &pools_clone,
+                        rpc_client
+                    ).await {
+                        error!("Proactive vault subscription failed: {}", e);
                     }
                 }
-                Ok(Message::Close(_)) => {
-                    println!("⚠️  Server closed the connection");
-                    break;
+            });
+        } else {
+            warn!("No RPC URL provided, vault pools may take longer to activate");
+        }
+        
+        // 🌐 使用select!同时处理WebSocket消息和动态订阅请求
+        loop {
+            tokio::select! {
+                // 处理WebSocket消息
+                message = read.next() => {
+                    match message {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Err(e) = self.handle_message(&text, pools).await {
+                                eprintln!("⚠️  Error handling message: {}", e);
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) => {
+                            println!("⚠️  Server closed the connection");
+                            break;
+                        }
+                        Some(Err(e)) => {
+                            eprintln!("❌ WebSocket error: {}", e);
+                            break;
+                        }
+                        None => {
+                            println!("⚠️  WebSocket stream ended");
+                            break;
+                        }
+                        _ => {}
+                    }
                 }
-                Err(e) => {
-                    eprintln!("❌ WebSocket error: {}", e);
-                    break;
+                
+                // 🌐 处理动态订阅请求
+                Some(req) = vault_rx.recv() => {
+                    match req {
+                        SubscriptionRequest::VaultAccount { address, pool_name } => {
+                            next_subscription_id += 1;
+                            let request_id = next_subscription_id;
+                            
+                            // 记录到pending map（等待服务器确认）
+                            {
+                                let mut pending = self.vault_pending_map.lock().unwrap();
+                                pending.insert(request_id, address.clone());
+                            }
+                            
+                            let subscribe_msg = json!({
+                                "jsonrpc": "2.0",
+                                "id": request_id,
+                                "method": "accountSubscribe",
+                                "params": [
+                                    address,
+                                    {
+                                        "encoding": "base64",
+                                        "commitment": "confirmed"
+                                    }
+                                ]
+                            });
+                            
+                            if let Err(e) = write.send(Message::Text(subscribe_msg.to_string())).await {
+                                error!("Failed to subscribe to vault {}: {}", address, e);
+                                // 订阅失败，从pending中移除
+                                let mut pending = self.vault_pending_map.lock().unwrap();
+                                pending.remove(&request_id);
+                            } else {
+                                info!("🌐 Subscribed to vault {} for pool {}", &address[0..8], pool_name);
+                            }
+                        }
+                    }
                 }
-                _ => {}
             }
+        }
+        
+        // 清理channel
+        {
+            let mut tx_lock = self.vault_subscription_tx.lock().unwrap();
+            *tx_lock = None;
         }
         
         Ok(())
@@ -192,10 +313,25 @@ impl WebSocketClient {
             if id > 0 && (id as usize) <= pools.len() {
                 let pool_config = pools[(id - 1) as usize].clone();
                 self.subscription_map.lock().unwrap().insert(subscription_id, pool_config.clone());
-                println!("✅ Subscription confirmed: id={}, subscription_id={}, pool={}", 
-                         id, subscription_id, pool_config.name);
+                debug!("✅ Pool subscription confirmed: id={}, subscription_id={}, pool={}", 
+                       id, subscription_id, pool_config.name);
+            } else if id >= 10000 {
+                // 🌐 这是vault账户订阅（ID >= 10000）
+                // 从pending map中获取vault地址，转移到subscription map
+                let vault_address = {
+                    let mut pending = self.vault_pending_map.lock().unwrap();
+                    pending.remove(&id)
+                };
+                
+                if let Some(address) = vault_address {
+                    self.vault_subscription_map.lock().unwrap().insert(subscription_id, address.clone());
+                    info!("✅ Vault subscription confirmed: request_id={}, subscription_id={}, vault={}", 
+                           id, subscription_id, &address[0..8]);
+                } else {
+                    warn!("Vault subscription confirmed but not found in pending map: id={}", id);
+                }
             } else {
-                println!("✅ Subscription confirmed: id={}, subscription_id={}", id, subscription_id);
+                debug!("Subscription confirmed: id={}, subscription_id={}", id, subscription_id);
             }
         }
         
@@ -229,7 +365,64 @@ impl WebSocketClient {
             .and_then(|s| s.as_u64())
             .context("Missing subscription ID")?;
         
-        // Look up pool config by subscription ID
+        // Decode base64 first (需要先解码来检查数据大小)
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(base64_data)
+            .context("Failed to decode base64")?;
+        
+        // 🌐 检查是否是 vault 账户更新（165 字节 = SPL Token Account）
+        if decoded.len() == 165 {
+            // 这是Token账户，从vault_subscription_map中查找vault地址
+            let vault_address = {
+                let vault_map = self.vault_subscription_map.lock().unwrap();
+                vault_map.get(&subscription_id).cloned()
+            };
+            
+            if let Some(address) = vault_address {
+                // 找到了vault地址，更新vault余额
+                return self.handle_vault_update(&address, &decoded, "vault").await;
+            } else {
+                // 不是我们订阅的vault，可能是其他Token账户
+                debug!("Received 165-byte account update (not a registered vault), subscription_id={}", subscription_id);
+                return Ok(());
+            }
+        }
+        
+        // 🔧 处理其他小尺寸账户（82字节等）- 这些是Solana网络的其他账户更新
+        // 通常是: Program derived addresses, Metadata accounts, 或其他非池子账户
+        if decoded.len() < 200 && decoded.len() != 165 {
+            // 检查是否在我们的订阅映射中
+            let is_known = {
+                let map = self.subscription_map.lock().unwrap();
+                map.contains_key(&subscription_id)
+            } || {
+                let vault_map = self.vault_subscription_map.lock().unwrap();
+                vault_map.contains_key(&subscription_id)
+            };
+            
+            if !is_known {
+                // 不是我们订阅的账户，静默忽略（降低日志噪音）
+                debug!("Ignoring small account update (unknown subscription): id={}, len={}", subscription_id, decoded.len());
+                return Ok(());
+            }
+        }
+        
+        // 🔥 修复：先检查是否是vault订阅
+        // 如果是vault，获取vault地址并处理
+        let vault_address_opt = {
+            let vault_map = self.vault_subscription_map.lock().unwrap();
+            vault_map.get(&subscription_id).cloned()
+        };
+        
+        if let Some(vault_address) = vault_address_opt {
+            // 这是一个vault订阅的更新
+            debug!("Received vault update: subscription_id={}, vault={}, len={}", 
+                subscription_id, vault_address, decoded.len());
+            return self.handle_vault_update(&vault_address, &decoded, "vault_subscription").await;
+        }
+        
+        // 不是vault，查找pool配置
         let pool_config = {
             let map = self.subscription_map.lock().unwrap();
             map.get(&subscription_id).cloned()
@@ -238,25 +431,14 @@ impl WebSocketClient {
         let pool_config = match pool_config {
             Some(config) => config,
             None => {
-                eprintln!("⚠️  Received update for unknown subscription ID: {}", subscription_id);
+                warn!("Received update for unknown subscription ID: {}, data_len={}", subscription_id, decoded.len());
                 return Ok(());
             }
         };
         
-        // Decode base64
-        use base64::Engine;
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(base64_data)
-            .context("Failed to decode base64")?;
-        
         let pool_name = &pool_config.name;
         let pool_type_str = &pool_config.pool_type;
         let pool_address = &pool_config.address;
-        
-        // 🌐 检查是否是 vault 账户更新（165 字节 = SPL Token Account）
-        if decoded.len() == 165 {
-            return self.handle_vault_update(pool_address, &decoded, pool_name).await;
-        }
         
         // ========================================
         // New Trait-based Approach
@@ -281,12 +463,26 @@ impl WebSocketClient {
                 
                 // 🌐 检查池子是否需要 vault 读取
                 if let Some((vault_a, vault_b)) = pool.get_vault_addresses() {
-                    // 首次处理这个池子，注册 vault 并订阅
-                    let mut pool_cache = self.pool_data_cache.lock().unwrap();
-                    if !pool_cache.contains_key(pool_address) {
-                        // 缓存池子数据
+                    // 🔥 关键修复：检查vault是否已注册，而不是检查池子是否在缓存中
+                    // 这样即使池子在RPC初始化时已激活，也会触发vault订阅
+                    let vault_a_str = vault_a.to_string();
+                    let vault_b_str = vault_b.to_string();
+                    
+                    let vault_already_registered = {
+                        let vault_reader = self.vault_reader.lock().unwrap();
+                        vault_reader.is_vault_account(&vault_a_str) && vault_reader.is_vault_account(&vault_b_str)
+                    };
+                    
+                    if !vault_already_registered {
+                        // 首次处理，需要注册并订阅vault
+                        let mut pool_cache = self.pool_data_cache.lock().unwrap();
                         pool_cache.insert(pool_address.clone(), decoded.clone());
                         drop(pool_cache);
+                        
+                        info!(
+                            pool = %pool_name,
+                            "Pool requires vault data, subscribing and waiting for vault updates..."
+                        );
                         
                         // 注册 vault
                         let vault_a_str = vault_a.to_string();
@@ -304,10 +500,34 @@ impl WebSocketClient {
                         println!("🌐 [{}] Detected vault addresses:", pool_name);
                         println!("   ├─ Vault A: {}", vault_a_str);
                         println!("   └─ Vault B: {}", vault_b_str);
-                        println!("   📡 Will subscribe to vault accounts for real-time reserve updates...");
                         
-                        // TODO: 在这里自动订阅 vault 账户
-                        // 需要传递 ws_stream 或者存储 subscription 队列
+                        // 🚀 发送动态订阅请求
+                        if let Some(tx) = self.vault_subscription_tx.lock().unwrap().as_ref() {
+                            // 订阅Vault A
+                            if let Err(e) = tx.send(SubscriptionRequest::VaultAccount {
+                                address: vault_a_str.clone(),
+                                pool_name: pool_name.to_string(),
+                            }) {
+                                error!("Failed to send vault A subscription request: {}", e);
+                            }
+                            
+                            // 订阅Vault B
+                            if let Err(e) = tx.send(SubscriptionRequest::VaultAccount {
+                                address: vault_b_str.clone(),
+                                pool_name: pool_name.to_string(),
+                            }) {
+                                error!("Failed to send vault B subscription request: {}", e);
+                            }
+                            
+                            println!("   ✅ Vault subscription requests sent!");
+                        } else {
+                            warn!("Vault subscription channel not available");
+                        }
+                        
+                    // 🔥 关键修复：不再阻塞等待vault数据
+                    // 让池子先激活，vault数据到达后会自动更新价格
+                    info!(pool = %pool_name, "Vault subscribed, pool will activate with initial data");
+                    // 注意：不再return，继续处理池子
                     }
                 }
                 
@@ -315,10 +535,169 @@ impl WebSocketClient {
                 self.update_cache_from_pool(pool.as_ref(), &pool_config, pool_name, slot, start_time);
             }
             Err(e) => {
-                eprintln!("⚠️  Failed to deserialize pool: {}. Type: {}, Error: {}, Data length: {} bytes",
-                          pool_name, pool_type_str, e, decoded.len());
+                // Record error with deduplication
+                let error_key = format!("{}_{}", pool_type_str, "deserialize_failed");
+                let error_msg = format!("{}: {}, Expected vs Actual size issue", pool_name, e);
+                
+                self.error_tracker.record_error(&error_key, error_msg).await;
+                
+                error!(
+                    pool = %pool_name,
+                    pool_type = %pool_type_str,
+                    data_len = decoded.len(),
+                    error = %e,
+                    "Failed to deserialize pool"
+                );
             }
         }
+        
+        Ok(())
+    }
+    
+    /// Clone necessary fields for proactive vault fetching in spawned task
+    fn clone_for_proactive_fetch(&self) -> Self {
+        Self {
+            url: self.url.clone(),
+            metrics: self.metrics.clone(),
+            proxy_config: self.proxy_config.clone(),
+            price_cache: self.price_cache.clone(),
+            error_tracker: self.error_tracker.clone(),
+            subscription_map: self.subscription_map.clone(),
+            vault_pending_map: self.vault_pending_map.clone(),
+            vault_subscription_map: self.vault_subscription_map.clone(),
+            vault_reader: self.vault_reader.clone(),
+            pool_data_cache: self.pool_data_cache.clone(),
+            last_prices: self.last_prices.clone(),
+            price_change_threshold: self.price_change_threshold,
+            vault_subscription_tx: self.vault_subscription_tx.clone(),
+            rpc_url: self.rpc_url.clone(),
+        }
+    }
+    
+    /// 🚀 主动通过RPC查询池子并触发vault检测
+    /// 解决Phoenix CLOB等冷门池子长时间无WebSocket更新的问题
+    /// 🔥 使用并行查询架构，避免串行阻塞
+    async fn proactively_trigger_vault_subscriptions(
+        &self,
+        pools: &[PoolConfig],
+        rpc_client: Arc<RpcClient>,
+    ) -> Result<()> {
+        info!("🚀 Proactively fetching pool states to trigger vault subscriptions...");
+        
+        // 收集所有需要查询的池子（Phoenix和SolFi）
+        let target_pools: Vec<_> = pools.iter()
+            .filter(|pool| {
+                let pool_type_lower = pool.pool_type.to_lowercase();
+                pool_type_lower.contains("phoenix") || pool_type_lower.contains("solfi")
+            })
+            .collect();
+        
+        info!("📋 Found {} vault-dependent pools to query", target_pools.len());
+        
+        // 🚀 并行发起所有RPC查询
+        let futures: Vec<_> = target_pools.iter().map(|pool_config| {
+            let rpc_clone = rpc_client.clone();
+            let pool_name = pool_config.name.clone();
+            let pool_address = pool_config.address.clone();
+            let pool_type = pool_config.pool_type.clone();
+            let address_str = pool_config.address.clone();
+            
+            async move {
+                // 解析池子地址
+                let pubkey = match Pubkey::from_str(&address_str) {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        warn!("❌ Invalid pubkey for {}: {}", pool_name, e);
+                        return None;
+                    }
+                };
+                
+                // 🔥 使用spawn_blocking避免阻塞Tokio运行时
+                let account_result = tokio::task::spawn_blocking(move || {
+                    rpc_clone.get_account(&pubkey)
+                }).await;
+                
+                match account_result {
+                    Ok(Ok(account)) => {
+                        Some((pool_name, pool_address, pool_type, account.data))
+                    }
+                    Ok(Err(e)) => {
+                        warn!("❌ RPC error fetching {}: {}", pool_name, e);
+                        None
+                    }
+                    Err(e) => {
+                        error!("❌ Task error fetching {}: {}", pool_name, e);
+                        None
+                    }
+                }
+            }
+        }).collect();
+        
+        // 等待所有查询完成
+        let results = join_all(futures).await;
+        
+        // 统计并处理结果
+        let mut fetched_count = 0;
+        let mut vault_triggered_count = 0;
+        
+        for result in results.into_iter().flatten() {
+            let (pool_name, pool_address, pool_type, data) = result;
+            fetched_count += 1;
+            
+            // 解析池子数据，触发vault检测
+            match PoolFactory::create_pool(&pool_type, &data) {
+                Ok(pool) => {
+                    if let Some((vault_a, vault_b)) = pool.get_vault_addresses() {
+                        let vault_a_str = vault_a.to_string();
+                        let vault_b_str = vault_b.to_string();
+                        
+                        // 检查vault是否已注册
+                        let vault_already_registered = {
+                            let vault_reader = self.vault_reader.lock().unwrap();
+                            vault_reader.is_vault_account(&vault_a_str) && 
+                            vault_reader.is_vault_account(&vault_b_str)
+                        };
+                        
+                        if !vault_already_registered {
+                            // 注册vault
+                            {
+                                let mut vault_reader = self.vault_reader.lock().unwrap();
+                                vault_reader.register_pool_vaults(
+                                    &pool_address,
+                                    &vault_a_str,
+                                    &vault_b_str
+                                );
+                            }
+                            
+                            info!("🌐 Proactively detected vaults for {}: {}, {}", 
+                                  pool_name, &vault_a_str[0..8], &vault_b_str[0..8]);
+                            
+                            // 发送订阅请求
+                            if let Some(tx) = self.vault_subscription_tx.lock().unwrap().as_ref() {
+                                let _ = tx.send(SubscriptionRequest::VaultAccount {
+                                    address: vault_a_str.clone(),
+                                    pool_name: pool_name.clone(),
+                                });
+                                let _ = tx.send(SubscriptionRequest::VaultAccount {
+                                    address: vault_b_str.clone(),
+                                    pool_name: pool_name.clone(),
+                                });
+                                
+                                vault_triggered_count += 1;
+                            }
+                        } else {
+                            info!("✓ Vaults already registered for {}, skipping", pool_name);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("❌ Failed to parse {}: {}", pool_name, e);
+                }
+            }
+        }
+        
+        info!("✅ Proactive fetch completed: {} pools fetched, {} vault subscriptions triggered", 
+              fetched_count, vault_triggered_count);
         
         Ok(())
     }
@@ -341,17 +720,63 @@ impl WebSocketClient {
             return Ok(());
         }
         
-        // 更新 vault 余额
-        match self.vault_reader.lock().unwrap().update_vault(vault_address, data) {
+        // 🔍 Log vault data length for debugging Token-2022 issues
+        debug!(
+            vault = %vault_address,
+            data_len = data.len(),
+            "Received vault update"
+        );
+        
+        // 🔥 关键修复：分离锁的作用域，避免死锁
+        // 在同一个作用域内获取所有需要的数据，然后立即释放锁
+        let (amount_result, pool_addresses) = {
+            let mut vault_reader = self.vault_reader.lock().unwrap();
+            // 更新vault余额
+            let amount = vault_reader.update_vault(vault_address, data);
+            // 获取使用此vault的池子列表
+            let pools = if amount.is_ok() {
+                vault_reader.get_pools_for_vault(vault_address)
+            } else {
+                Vec::new()
+            };
+            (amount, pools)
+        }; // MutexGuard在这里被drop，锁已释放
+        
+        // 处理结果（此时已不持有任何锁）
+        match amount_result {
             Ok(amount) => {
-                println!("💰 Vault updated: {} = {}", 
-                         &vault_address[0..8], 
-                         amount);
+                debug!(vault = %vault_address, amount = %amount, "Vault balance updated");
                 
-                // TODO: 触发相关池子的价格重新计算
+                // 🚨 Critical fix: Trigger price recalculation for related pools
+                // 一次性获取所有需要的数据（避免嵌套锁）
+                let configs_and_data: Vec<_> = {
+                    let subscription_map = self.subscription_map.lock().unwrap();
+                    let cache = self.pool_data_cache.lock().unwrap();
+                    
+                    pool_addresses.into_iter()
+                        .filter_map(|pool_addr| {
+                            let config = subscription_map.values()
+                                .find(|p| p.address == pool_addr)
+                                .cloned()?;
+                            let data = cache.get(&pool_addr).cloned()?;
+                            Some((config, data))
+                        })
+                        .collect()
+                };
+                
+                // 安全处理（不持有任何锁）
+                for (config, data) in configs_and_data {
+                    info!(pool = %config.name, "Recalculating price after vault update");
+                    
+                    if let Ok(pool) = PoolFactory::create_pool(&config.pool_type, &data) {
+                        let slot = 0;
+                        let start_time = Instant::now();
+                        self.update_cache_from_pool(pool.as_ref(), &config, &config.name, slot, start_time);
+                    }
+                }
             }
             Err(e) => {
-                eprintln!("⚠️  Failed to update vault {}: {}", vault_address, e);
+                warn!(vault = %vault_address, error = %e, "Failed to update vault");
             }
         }
         
@@ -385,14 +810,27 @@ impl WebSocketClient {
         };
         
         // Get pool information using unified interface
-        let price = if base_reserve > 0 {
+        let price = if base_reserve > 0 && quote_reserve > 0 {
             let (base_decimals, quote_decimals) = pool.get_decimals();
             let base_f64 = base_reserve as f64 / 10f64.powi(base_decimals as i32);
             let quote_f64 = quote_reserve as f64 / 10f64.powi(quote_decimals as i32);
-            quote_f64 / base_f64
+            // 🚨 Critical fix: Prevent division by zero
+            if base_f64 > 0.0 {
+                quote_f64 / base_f64
+            } else {
+                0.0
+            }
         } else {
-            pool.calculate_price()
+            // 🚨 For vault-based pools (SolFi V2, etc.), reserves may be 0 initially
+            // Don't call calculate_price as it might also return 0
+            0.0
         };
+        
+        // 🚨 Critical fix: Skip updates with zero price (vault not ready yet)
+        if price == 0.0 {
+            debug!(pool = %pool_name, "Skipping pool with zero price (vault data not ready)");
+            return;
+        }
         let (base_decimals, quote_decimals) = pool.get_decimals();
         let dex_name = pool.dex_name();
         
@@ -414,28 +852,54 @@ impl WebSocketClient {
             quote_decimals,
             price,
             last_update: Instant::now(),
+            slot,  // 🎯 记录slot用于数据一致性
         };
         
         self.price_cache.update_price(pool_price);
         
-        // Print update with unified format
-        println!("┌─────────────────────────────────────────────────────");
-        println!("│ [{}] {} Pool Updated", Utc::now().format("%Y-%m-%d %H:%M:%S"), pool_name);
-        println!("│ ├─ Type:         {}", dex_name);
-        println!("│ ├─ Price:        {:.4} (quote/base)", price);
-        println!("│ ├─ Base Reserve:   {:>13.2}", base_reserve_readable);
-        println!("│ ├─ Quote Reserve: {:>14.2}", quote_reserve_readable);
+        // 🔥 Check price change and only log if significant
+        let should_log = {
+            let price_changed = if let Some(entry) = self.last_prices.get(pool_name) {
+                let last_price = *entry.value();
+                let change_pct = ((price - last_price) / last_price * 100.0).abs();
+                
+                if !change_pct.is_finite() {
+                    warn!(pool = %pool_name, price, last_price, 
+                          "Invalid price change (NaN/Infinity)");
+                    return;
+                }
+                
+                change_pct >= self.price_change_threshold
+            } else {
+                true
+            };
+            
+            if price_changed {
+                self.last_prices.insert(pool_name.to_string(), price);
+            }
+            
+            price_changed
+        };
         
-        // Print additional pool-specific info if available
-        if let Some(info) = pool.get_additional_info() {
-            println!("│ ├─ Info:         {}", info);
+        if should_log {
+            info!(
+                pool = %pool_name,
+                dex = %dex_name,
+                price = %price,
+                base_reserve = %base_reserve_readable,
+                quote_reserve = %quote_reserve_readable,
+                latency_us = latency_micros,
+                slot = slot,
+                "Pool price updated (significant change)"
+            );
+        } else {
+            debug!(
+                pool = %pool_name,
+                price = %price,
+                latency_us = latency_micros,
+                "Pool price updated (minor change)"
+            );
         }
-        
-        println!("│ ├─ Latency:      {:.3} ms ({} μs)", 
-                 latency.as_secs_f64() * 1000.0, latency_micros);
-        println!("│ ├─ Slot:         {}", slot);
-        println!("│ └─ ✅ Price cache updated");
-        println!("└─────────────────────────────────────────────────────");
     }
 }
 

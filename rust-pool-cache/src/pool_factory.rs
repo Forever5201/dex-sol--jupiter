@@ -1,9 +1,9 @@
 use crate::dex_interface::{DexError, DexPool};
 use crate::deserializers::{
-    LifinityV2PoolState, MeteoraPoolState, RaydiumAmmInfo, RaydiumClmmPoolState, 
+    LifinityV2PoolState, MeteoraPoolState, MeteoraPoolStateImproved, RaydiumAmmInfo, RaydiumClmmPoolState, 
     AlphaQPoolState, SolFiV2PoolState, HumidiFiPoolState, GoonFiPoolState,
     TesseraVPoolState, StabblePoolState, AquiferPoolState, WhirlpoolState,
-    PancakeSwapPoolState
+    PancakeSwapPoolState, PhoenixMarketState, PhoenixMarketSDK, PhoenixMarketFull, OpenBookMarketState
 };
 
 /// Factory for creating DEX pool instances
@@ -44,9 +44,17 @@ impl PoolFactory {
                 Ok(Box::new(LifinityV2PoolState::from_account_data(data)?))
             }
             
-            // Meteora DLMM
+            // Meteora DLMM (使用改进的结构)
             "meteora_dlmm" | "meteora" | "dlmm" => {
-                Ok(Box::new(MeteoraPoolState::from_account_data(data)?))
+                // 尝试新的改进结构（896字节精确匹配）
+                match MeteoraPoolStateImproved::from_account_data(data) {
+                    Ok(pool) => Ok(Box::new(pool)),
+                    Err(e) => {
+                        // 如果新结构失败，尝试原来的结构作为降级
+                        eprintln!("⚠️  Meteora Improved failed, trying legacy: {}", e);
+                        Ok(Box::new(MeteoraPoolState::from_account_data(data)?))
+                    }
+                }
             }
             
             // AlphaQ
@@ -92,6 +100,26 @@ impl PoolFactory {
             // PancakeSwap
             "pancakeswap" | "pancake_swap" | "pancake" | "pcs" => {
                 Ok(Box::new(PancakeSwapPoolState::from_account_data(data)?))
+            }
+            
+            // Phoenix (CLOB) - Full SDK version (推荐！完整OrderBook解析)
+            "phoenix" | "phoenix_full" | "phoenix_sdk" => {
+                Ok(Box::new(PhoenixMarketFull::from_account_data(data)?))
+            }
+            
+            // Phoenix (CLOB) - Placeholder version (价格为0)
+            "phoenix_placeholder" => {
+                Ok(Box::new(PhoenixMarketSDK::from_account_data(data)?))
+            }
+            
+            // Phoenix (CLOB) - Simple version (Header only)
+            "phoenix_simple" | "phoenix_clob" | "phoenixclob" => {
+                Ok(Box::new(PhoenixMarketState::from_account_data(data)?))
+            }
+            
+            // OpenBook V2 (CLOB)
+            "openbook_v2" | "openbookv2" | "openbook" | "obv2" => {
+                Ok(Box::new(OpenBookMarketState::from_account_data(data)?))
             }
             
             // Unknown type

@@ -124,7 +124,11 @@ impl DexPool for GoonFiPoolState {
     }
     
     fn is_active(&self) -> bool {
-        self.get_reserve_a() > 0 || self.get_reserve_b() > 0
+        // ✅ FIX: GoonFi 使用Vault模式，储备量在外部vault账户中
+        // 不能检查池子账户的储备量（永远为0），而应该检查vault地址是否有效
+        // pubkey_4和pubkey_5是vault地址，确保它们不是默认值
+        self.pubkey_4 != Pubkey::default() && 
+        self.pubkey_5 != Pubkey::default()
     }
     
     fn get_additional_info(&self) -> Option<String> {

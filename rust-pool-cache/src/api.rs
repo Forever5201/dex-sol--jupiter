@@ -9,12 +9,18 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::arbitrage::{scan_for_arbitrage, ArbitrageOpportunity};
+use crate::error_tracker::ErrorTracker;
 use crate::price_cache::PriceCache;
+use crate::opportunity_validator::{OpportunityValidator, ValidationResult};
+
+use crate::onchain_simulator::OnChainSimulator;
 
 /// API State shared across handlers
 #[derive(Clone)]
 pub struct ApiState {
     pub price_cache: Arc<PriceCache>,
+    pub error_tracker: Arc<ErrorTracker>,
+    pub simulator: Option<Arc<OnChainSimulator>>,  // 🎯 链上模拟器（可选）
 }
 
 /// Response for health check
@@ -159,9 +165,168 @@ async fn scan_arbitrage(
     })
 }
 
+/// GET /errors - Get error statistics
+async fn get_errors(State(state): State<ApiState>) -> Json<serde_json::Value> {
+    let report = state.error_tracker.get_error_report().await;
+    Json(serde_json::to_value(report).unwrap_or_default())
+}
+
+/// 🎯 数据质量统计端点 - 用于监控数据一致性
+#[derive(Serialize)]
+pub struct DataQualityResponse {
+    total_pools: usize,
+    fresh_pools: usize,          // <2秒的数据
+    slot_aligned_pools: usize,    // 与最新slot差异<5
+    average_age_ms: u64,
+    latest_slot: u64,
+    slot_distribution: std::collections::HashMap<u64, usize>,
+    consistency_score: f64,       // 0-100，数据一致性评分
+}
+
+async fn get_data_quality(State(state): State<ApiState>) -> Json<DataQualityResponse> {
+    let (total, fresh, aligned, avg_age, slot_dist) = state.price_cache.get_data_quality_stats();
+    let latest_slot = state.price_cache.get_latest_slot();
+    
+    // 计算一致性评分
+    let consistency_score = if total > 0 {
+        let freshness_score = (fresh as f64 / total as f64) * 50.0;
+        let alignment_score = (aligned as f64 / total as f64) * 50.0;
+        freshness_score + alignment_score
+    } else {
+        0.0
+    };
+    
+    Json(DataQualityResponse {
+        total_pools: total,
+        fresh_pools: fresh,
+        slot_aligned_pools: aligned,
+        average_age_ms: avg_age,
+        latest_slot,
+        slot_distribution: slot_dist,
+        consistency_score,
+    })
+}
+
+/// POST /scan-validated - 🎯 扫描并验证套利机会（推荐使用）
+/// 
+/// 增强版套利扫描，包含：
+/// - Slot对齐数据
+/// - 数据新鲜度验证
+/// - 流动性检查
+/// - 价格变化检测
+#[derive(Deserialize)]
+pub struct ScanValidatedRequest {
+    pub min_profit_bps: Option<u64>,
+    pub amount: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub struct ValidatedArbitrageResponse {
+    valid_opportunities: Vec<ValidatedOpportunityDto>,
+    invalid_count: usize,
+    validation_stats: ValidationStatsDto,
+}
+
+#[derive(Serialize)]
+pub struct ValidatedOpportunityDto {
+    #[serde(flatten)]
+    opportunity: ArbitrageOpportunityDto,
+    confidence_score: f64,
+    average_age_ms: u64,
+    slot_spread: u64,
+}
+
+#[derive(Serialize)]
+pub struct ValidationStatsDto {
+    total: usize,
+    valid: usize,
+    invalid: usize,
+    pass_rate: f64,
+    average_confidence: f64,
+}
+
+async fn scan_validated(
+    State(state): State<ApiState>,
+    Json(payload): Json<ScanValidatedRequest>,
+) -> Json<ValidatedArbitrageResponse> {
+    let min_profit_bps = payload.min_profit_bps.unwrap_or(30);
+    let amount = payload.amount.unwrap_or(1000.0);
+    let threshold_pct = min_profit_bps as f64 / 100.0;
+    
+    // 🎯 阶段1：扫描机会（使用全部缓存）
+    let opportunities = scan_for_arbitrage(&state.price_cache, threshold_pct);
+    
+    // 🎯 阶段2：轻量级验证（数据质量检查）
+    let validator = OpportunityValidator::with_defaults(state.price_cache.clone());
+    let (valid_opps, _invalid_opps, stats) = validator.validate_batch(opportunities, amount);
+    
+    // 🎯 阶段3：链上模拟验证（可选，仅高置信度机会）
+    let (final_opps, simulated_count) = if let Some(simulator) = &state.simulator {
+        // 并发验证所有高置信度机会
+        let verified = simulator.verify_batch(valid_opps.clone()).await;
+        let count = verified.len();
+        
+        // 转换回(opportunity, confidence)格式
+        let converted: Vec<(ArbitrageOpportunity, f64)> = verified
+            .into_iter()
+            .map(|(opp, sim_result)| {
+                // 使用模拟后的置信度（更高）
+                let updated_confidence = if sim_result.still_profitable { 95.0 } else { 50.0 };
+                (opp, updated_confidence)
+            })
+            .collect();
+        
+        (converted, count)
+    } else {
+        // 无模拟器，直接使用轻量级验证结果
+        let count = valid_opps.len();
+        (valid_opps, 0)  // simulated_count = 0
+    };
+    
+    // 转换为DTO
+    let valid_dto: Vec<ValidatedOpportunityDto> = final_opps
+        .into_iter()
+        .map(|(opp, confidence)| {
+            // 获取数据质量详情
+            let (age, slot_spread) = if let ValidationResult::Valid { data_quality, .. } = validator.validate(&opp, amount) {
+                (data_quality.average_age_ms, data_quality.slot_spread)
+            } else {
+                (0, 0)
+            };
+            
+            ValidatedOpportunityDto {
+                opportunity: opp.into(),
+                confidence_score: confidence,
+                average_age_ms: age,
+                slot_spread,
+            }
+        })
+        .collect();
+    
+    Json(ValidatedArbitrageResponse {
+        valid_opportunities: valid_dto,
+        invalid_count: stats.total - stats.valid,
+        validation_stats: ValidationStatsDto {
+            total: stats.total,
+            valid: stats.valid,
+            invalid: stats.total - stats.valid,
+            pass_rate: stats.pass_rate(),
+            average_confidence: stats.average_confidence(),
+        },
+    })
+}
+
 /// Create the API router
-pub fn create_router(price_cache: Arc<PriceCache>) -> Router {
-    let state = ApiState { price_cache };
+pub fn create_router(
+    price_cache: Arc<PriceCache>, 
+    error_tracker: Arc<ErrorTracker>,
+    simulator: Option<Arc<OnChainSimulator>>,
+) -> Router {
+    let state = ApiState { 
+        price_cache,
+        error_tracker,
+        simulator,
+    };
     
     // Configure CORS
     let cors = CorsLayer::new()
@@ -174,6 +339,9 @@ pub fn create_router(price_cache: Arc<PriceCache>) -> Router {
         .route("/prices", get(get_all_prices))
         .route("/prices/:pair", get(get_pair_prices))
         .route("/scan-arbitrage", post(scan_arbitrage))
+        .route("/scan-validated", post(scan_validated))  // 🎯 验证增强版扫描
+        .route("/errors", get(get_errors))
+        .route("/data-quality", get(get_data_quality))
         .layer(cors)
         .with_state(state)
 }
@@ -181,9 +349,11 @@ pub fn create_router(price_cache: Arc<PriceCache>) -> Router {
 /// Start the API server
 pub async fn start_api_server(
     price_cache: Arc<PriceCache>,
+    error_tracker: Arc<ErrorTracker>,
+    simulator: Option<Arc<OnChainSimulator>>,
     port: u16,
 ) -> anyhow::Result<()> {
-    let app = create_router(price_cache);
+    let app = create_router(price_cache, error_tracker, simulator);
     
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     println!("🌐 HTTP API server listening on http://0.0.0.0:{}", port);
@@ -191,7 +361,10 @@ pub async fn start_api_server(
     println!("     GET  /health");
     println!("     GET  /prices");
     println!("     GET  /prices/:pair");
-    println!("     POST /scan-arbitrage");
+    println!("     POST /scan-arbitrage       (Legacy)");
+    println!("     POST /scan-validated       🎯 Recommended: With validation");
+    println!("     GET  /errors");
+    println!("     GET  /data-quality         📊 Data consistency stats");
     
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

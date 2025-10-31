@@ -1,5 +1,6 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use solana_sdk::pubkey::Pubkey;
+use crate::dex_interface::DexError;
 
 /// SPL Token Account State
 /// 
@@ -33,6 +34,26 @@ pub struct TokenAccount {
 
 #[allow(dead_code)]
 impl TokenAccount {
+    /// Deserialize from account data
+    /// 
+    /// SPL Token accounts are 165 bytes:
+    /// - No discriminator (not an Anchor account)
+    /// - Direct Borsh deserialization
+    pub fn from_account_data(data: &[u8]) -> Result<Self, DexError> {
+        if data.len() != 165 {
+            return Err(DexError::DeserializationFailed(format!(
+                "SPL Token account: Expected 165 bytes, got {} bytes",
+                data.len()
+            )));
+        }
+        
+        Self::try_from_slice(data)
+            .map_err(|e| DexError::DeserializationFailed(format!(
+                "SPL Token account: Borsh deserialization failed: {}",
+                e
+            )))
+    }
+    
     /// Get the token amount as a human-readable value
     pub fn get_amount_ui(&self, decimals: u8) -> f64 {
         self.amount as f64 / 10f64.powi(decimals as i32)

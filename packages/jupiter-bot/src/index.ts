@@ -10,7 +10,7 @@ import { OpportunityFinder, ArbitrageOpportunity } from './opportunity-finder';
 import { SpamExecutor, SpamConfig } from './executors/spam-executor';
 import { JitoExecutor } from '@solana-arb-bot/onchain-bot';
 import { JupiterServerManager } from '@solana-arb-bot/jupiter-server';
-import { createLogger, JitoTipOptimizer } from '@solana-arb-bot/core';
+import { createLogger, JitoTipOptimizer, KeypairManager } from '@solana-arb-bot/core';
 import { readFileSync } from 'fs';
 import axios from 'axios';
 
@@ -85,8 +85,18 @@ export class JupiterBot {
       'processed'
     );
     
-    // 加载钱包
-    this.keypair = this.loadKeypair(config.keypairPath);
+    // 加载钱包（智能检测：优先使用环境变量，否则使用配置文件路径）
+    // 优先级：SOLANA_PRIVATE_KEY > SOLANA_KEYPAIR_PATH > config.keypairPath
+    if (process.env.SOLANA_PRIVATE_KEY) {
+      logger.info('🔑 Using keypair from environment variable: SOLANA_PRIVATE_KEY');
+      this.keypair = KeypairManager.load();
+    } else if (process.env.SOLANA_KEYPAIR_PATH) {
+      logger.info(`🔑 Using keypair from environment variable: SOLANA_KEYPAIR_PATH=${process.env.SOLANA_KEYPAIR_PATH}`);
+      this.keypair = KeypairManager.load();
+    } else {
+      logger.info(`🔑 Using keypair from config file: ${config.keypairPath}`);
+      this.keypair = KeypairManager.load({ filePath: config.keypairPath });
+    }
     logger.info(`Wallet loaded: ${this.keypair.publicKey.toBase58()}`);
 
     // 加载代币列表
@@ -126,19 +136,6 @@ export class JupiterBot {
     }
   }
 
-  /**
-   * 加载密钥对
-   */
-  private loadKeypair(path: string): Keypair {
-    try {
-      const secretKeyString = readFileSync(path, 'utf-8');
-      const secretKey = Uint8Array.from(JSON.parse(secretKeyString));
-      return Keypair.fromSecretKey(secretKey);
-    } catch (error) {
-      logger.error(`Failed to load keypair from ${path}:`, error);
-      throw error;
-    }
-  }
 
   /**
    * 加载代币列表

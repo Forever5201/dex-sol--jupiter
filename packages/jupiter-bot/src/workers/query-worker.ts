@@ -13,12 +13,17 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { UnifiedNetworkAdapter } from '@solana-arb-bot/core'; // 🌐 使用统一网络适配器
 
 // 🚀 Jupiter API 配置（支持本地/远程切换）
-const USE_LOCAL_API = process.env.USE_LOCAL_JUPITER_API !== 'false'; // 默认使用本地
+const shouldUseLocalApi = (value?: string | null): boolean => {
+  if (!value) return false;
+  return ['true', '1', 'yes', 'on'].includes(value.toLowerCase());
+};
+
+const USE_LOCAL_API = shouldUseLocalApi(process.env.USE_LOCAL_JUPITER_API);
 const JUPITER_API_URL = USE_LOCAL_API 
   ? (process.env.JUPITER_LOCAL_API || 'http://localhost:8080')
-  : 'https://api.jup.ag/ultra';
+  : 'https://api.jup.ag/ultra';  // 🔥 Ultra API (需要 API Key)
 
-const API_ENDPOINT = USE_LOCAL_API ? '/quote' : '/v1/order';
+const API_ENDPOINT = USE_LOCAL_API ? '/quote' : '/v1/quote';  // 🔥 Ultra API 使用 /v1/quote
 
 interface WorkerConfig {
   workerId: number;
@@ -53,7 +58,7 @@ const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 const axiosConfig = {
   ...UnifiedNetworkAdapter.createWorkerAxiosConfig({
     proxyUrl: proxyUrl || null,
-    timeout: 1500,  // 🔥 Worker 使用激进的超时：快速失败
+    timeout: 5000,  // 🔥 增加超时时间到 5 秒（适应国内网络）
     enablePooling: true,  // 启用连接池优化
   }),
   headers: {
@@ -65,7 +70,7 @@ const axiosConfig = {
   maxRedirects: 0,
 };
 
-console.log(`Worker ${workerId} using NetworkAdapter config: ${proxyUrl ? 'proxy enabled' : 'direct connection'}, timeout=1.5s`);
+console.log(`Worker ${workerId} using NetworkAdapter config: ${proxyUrl ? 'proxy enabled' : 'direct connection'}, timeout=5s`);
 
 // 桥接代币从主线程通过 workerData 接收（不再从文件加载）
 const BRIDGE_TOKENS = config.bridges;
@@ -144,13 +149,87 @@ async function warmupConnections(): Promise<void> {
   }
 }
 
-// 历史兑换比率存储（用于估算）
-// 结构：Map<"SOL-USDC", ratio>
-const historicalRatios = new Map<string, number>();
+/**
+ * Token信息接口
+ */
+interface TokenInfo {
+  symbol: string;
+  decimals: number;
+}
 
-// 初始化默认比率（基于市场价格）
-historicalRatios.set('SOL-USDC', 185.0);  // 1 SOL ≈ 185 USDC
-historicalRatios.set('SOL-USDT', 185.0);  // 1 SOL ≈ 185 USDT
+/**
+ * Token信息映射表
+ * 包含所有可能作为输入的token（来自mints.txt + bridge-tokens.json）
+ */
+const TOKEN_INFO = new Map<string, TokenInfo>([
+  // 原生SOL
+  ['So11111111111111111111111111111111111111112', { symbol: 'SOL', decimals: 9 }],
+  // 稳定币
+  ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', { symbol: 'USDC', decimals: 6 }],
+  ['Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', { symbol: 'USDT', decimals: 6 }],
+  // 主流加密资产
+  ['7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs', { symbol: 'ETH', decimals: 8 }],
+  ['3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh', { symbol: 'WBTC', decimals: 8 }],
+  // DeFi代币
+  ['JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN', { symbol: 'JUP', decimals: 6 }],
+  ['DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', { symbol: 'BONK', decimals: 5 }],
+  ['4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R', { symbol: 'RAY', decimals: 6 }],
+  // LST (Liquid Staking Tokens)
+  ['mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So', { symbol: 'mSOL', decimals: 9 }],
+  ['J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn', { symbol: 'jitoSOL', decimals: 9 }],
+  ['7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj', { symbol: 'bSOL', decimals: 9 }],
+]);
+
+/**
+ * 获取Token信息（带回退机制）
+ * @param mint Token mint地址
+ * @returns TokenInfo对象
+ */
+function getTokenInfo(mint: string): TokenInfo {
+  const info = TOKEN_INFO.get(mint);
+  if (info) {
+    return info;
+  }
+  
+  // 回退：返回未知token，默认9位小数（SOL标准）
+  console.log(`⚠️ Unknown token mint: ${mint.slice(0, 8)}..., using default decimals=9`);
+  return { symbol: `${mint.slice(0, 4)}...${mint.slice(-4)}`, decimals: 9 };
+}
+
+/**
+ * 获取智能默认比率
+ * @param inputMint 输入token地址
+ * @param bridgeMint 桥接token地址
+ * @returns 默认兑换比率
+ */
+function getSmartDefaultRatio(inputMint: string, bridgeMint: string): number {
+  const SOL_MINT = 'So11111111111111111111111111111111111111112';
+  const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  const USDT_MINT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+  
+  // SOL → 稳定币：1 SOL ≈ 185 USDC/USDT
+  if (inputMint === SOL_MINT && (bridgeMint === USDC_MINT || bridgeMint === USDT_MINT)) {
+    return 185.0;
+  }
+  
+  // 稳定币 → SOL：1 USDC/USDT ≈ 0.0054 SOL
+  if ((inputMint === USDC_MINT || inputMint === USDT_MINT) && bridgeMint === SOL_MINT) {
+    return 0.0054;
+  }
+  
+  // 稳定币对（USDC ↔ USDT）：1:1
+  if ((inputMint === USDC_MINT || inputMint === USDT_MINT) && 
+      (bridgeMint === USDC_MINT || bridgeMint === USDT_MINT)) {
+    return 1.0;
+  }
+  
+  // 其他token对：首次使用1.0，等待实际结果更新
+  return 1.0;
+}
+
+// 历史兑换比率存储（用于估算）
+// 结构：Map<"inputMint-bridgeMint", ratio>（使用完整mint地址确保精确）
+const historicalRatios = new Map<string, number>();
 
 // 统计信息
 let queriesTotal = 0;
@@ -216,16 +295,22 @@ async function queryBridgeArbitrage(
       return null;
     }
 
+    // 🔥 获取输入token信息（用于正确显示日志）
+    const inputTokenInfo = getTokenInfo(inputMint);
+    const inputDecimals = Math.pow(10, inputTokenInfo.decimals);
+    const bridgeDecimals = Math.pow(10, bridgeToken.decimals);
+    const inputAmountDisplay = config.amount / inputDecimals;
+
     // 首次查询时输出调试信息
     if (queriesTotal === 0) {
       console.log(`[Worker ${workerId}] 🚀 First parallel query starting...`);
       console.log(`   API: ${JUPITER_API_URL}${API_ENDPOINT} ${USE_LOCAL_API ? '(🟢 LOCAL API)' : '(🔴 REMOTE API)'}`);
-      console.log(`   Mode: ${USE_LOCAL_API ? 'Local (< 5ms latency)' : 'Remote (~150ms latency)'}`);
-      console.log(`   API Key: ${config.apiKey ? config.apiKey.slice(0, 8) + '...' : 'Not configured (not needed for local)'}`);
-      console.log(`   Amount: ${config.amount} lamports (${(config.amount / 1e9).toFixed(1)} SOL)`);
-      console.log(`   Path: ${inputMint.slice(0, 8)}... → ${bridgeToken.symbol}`);
-      console.log(`   Routing: ${USE_LOCAL_API ? 'Local Jupiter Router (All DEXes)' : 'iris/Metis v2 + JupiterZ RFQ'}`);
-      console.log(`   Rate Limit: Dynamic (Base 50 req/10s, scales with volume)`);
+      console.log(`   Mode: ${USE_LOCAL_API ? 'Local (< 5ms latency)' : 'Remote (~500ms latency)'}`);
+      console.log(`   API Key: ${config.apiKey ? 'Configured (...' + config.apiKey.slice(-8) + ')' : '⚠️ MISSING (Ultra API requires key!)'}`);
+      console.log(`   Amount: ${config.amount} lamports (${inputAmountDisplay.toFixed(2)} ${inputTokenInfo.symbol})`);
+      console.log(`   Path: ${inputMint.slice(0, 8)}... (${inputTokenInfo.symbol}) → ${bridgeToken.symbol}`);
+      console.log(`   Routing: ${USE_LOCAL_API ? 'Local Jupiter Router (All DEXes)' : 'Ultra API Beta - iris/Metis v2 + JupiterZ RFQ'}`);
+      console.log(`   Rate Limit: Dynamic (5 RPS base, auto-scaling with volume)`);
       console.log(`   🔥 Smart Parallel Query: Estimate + Unit Price Method`);
     }
 
@@ -235,12 +320,12 @@ async function queryBridgeArbitrage(
       bridgeStat.queries++;
     }
 
-    // 生成比率键
-    const inputSymbol = 'SOL';  // 假设输入是SOL
-    const ratioKey = `${inputSymbol}-${bridgeToken.symbol}`;
+    // 生成精确的比率键（使用mint地址对）
+    const ratioKey = `${inputMint}-${bridgeToken.mint}`;
     
-    // 获取历史比率（如果没有则使用默认值）
-    const historicalRatio = historicalRatios.get(ratioKey) || 185.0;
+    // 获取历史比率（如果没有则使用智能默认值）
+    const historicalRatio = historicalRatios.get(ratioKey) || 
+      getSmartDefaultRatio(inputMint, bridgeToken.mint);
     
     // 估算去程输出（USDC金额）
     const estimatedBridgeAmount = Math.floor((config.amount / 1e9) * historicalRatio * 1e6);  // 转换为USDC的最小单位
@@ -371,23 +456,36 @@ async function queryBridgeArbitrage(
     }
     
     // 📊 输出详细的并行查询信息（用于调试和验证）
+    // 计算正确的显示单价（inputToken/bridgeToken）
+    const pricePerBridgeDisplay = (estimatedReturnSOL / inputDecimals) / (estimatedBridgeAmount / bridgeDecimals);
+    
+    // 计算人类可读的金额（inputAmountDisplay已在前面定义）
+    const actualBridgeAmountDisplay = actualBridgeAmount / bridgeDecimals;
+    const estimatedBridgeAmountDisplay = estimatedBridgeAmount / bridgeDecimals;
+    const estimatedReturnDisplay = estimatedReturnSOL / inputDecimals;
+    const actualReturnDisplay = actualReturnSOL / inputDecimals;
+    const profitDisplay = profit / inputDecimals;
+    
     console.log(
       `[Worker ${workerId}] ⚡ Parallel query: ${parallelLatency}ms (out:${outboundMs}ms, ret:${returnMs}ms)`
     );
     console.log(
-      `  ├─ 去程: ${(config.amount / 1e9).toFixed(2)} SOL → ${(actualBridgeAmount / 1e6).toFixed(2)} ${bridgeToken.symbol} (${outboundMs}ms)`
+      `  ├─ 去程: ${inputAmountDisplay.toFixed(2)} ${inputTokenInfo.symbol} → ${actualBridgeAmountDisplay.toFixed(2)} ${bridgeToken.symbol} (${outboundMs}ms)`
     );
     console.log(
-      `  ├─ 回程: ${(estimatedBridgeAmount / 1e6).toFixed(2)} ${bridgeToken.symbol} (估算) → ${(estimatedReturnSOL / 1e9).toFixed(6)} SOL (${returnMs}ms)`
+      `  ├─ 回程: ${estimatedBridgeAmountDisplay.toFixed(2)} ${bridgeToken.symbol} (估算) → ${estimatedReturnDisplay.toFixed(6)} ${inputTokenInfo.symbol} (${returnMs}ms)`
     );
     console.log(
-      `  ├─ 单价: ${(pricePerBridge / 1000).toFixed(8)} SOL/${bridgeToken.symbol}`
+      `  ├─ 比率键: ${inputMint.slice(0,6)}...${inputMint.slice(-4)}-${bridgeToken.mint.slice(0,6)}...${bridgeToken.mint.slice(-4)}`
     );
     console.log(
-      `  ├─ 实际返回: ${(pricePerBridge / 1000).toFixed(8)} × ${(actualBridgeAmount / 1e6).toFixed(2)} = ${(actualReturnSOL / 1e9).toFixed(6)} SOL`
+      `  ├─ 单价: ${pricePerBridgeDisplay.toFixed(8)} ${inputTokenInfo.symbol}/${bridgeToken.symbol}`
     );
     console.log(
-      `  └─ 利润: ${(actualReturnSOL / 1e9).toFixed(6)} - ${(config.amount / 1e9).toFixed(2)} = ${(profit / 1e9).toFixed(6)} SOL (比率=${newRatio.toFixed(2)})`
+      `  ├─ 实际返回: ${pricePerBridgeDisplay.toFixed(8)} × ${actualBridgeAmountDisplay.toFixed(2)} = ${actualReturnDisplay.toFixed(6)} ${inputTokenInfo.symbol}`
+    );
+    console.log(
+      `  └─ 利润: ${actualReturnDisplay.toFixed(6)} - ${inputAmountDisplay.toFixed(2)} = ${profitDisplay.toFixed(6)} ${inputTokenInfo.symbol} (比率=${newRatio.toFixed(2)})`
     );
 
     return {
@@ -620,10 +718,13 @@ async function scanLoop(): Promise<void> {
             });
 
             // 在控制台输出机会详情（便于调试）
+            const oppInputInfo = getTokenInfo(opportunity.inputMint);
+            const oppProfitDisplay = opportunity.profit / Math.pow(10, oppInputInfo.decimals);
+            
             console.log(
               `\n🎯 [Worker ${workerId}] Opportunity #${opportunitiesFound}:`,
               `\n   Path: ${opportunity.inputMint.slice(0, 4)}... → ${opportunity.bridgeToken} → ${opportunity.inputMint.slice(0, 4)}...`,
-              `\n   Profit: ${(opportunity.profit / 1e9).toFixed(6)} SOL (${opportunity.roi.toFixed(2)}%)`,
+              `\n   Profit: ${oppProfitDisplay.toFixed(6)} ${oppInputInfo.symbol} (${opportunity.roi.toFixed(2)}%)`,
               `\n   Query time: ${opportunity.queryTime}ms`
             );
           }

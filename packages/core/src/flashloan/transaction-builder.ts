@@ -10,9 +10,11 @@ import {
   TransactionMessage,
   VersionedTransaction,
   AddressLookupTableAccount,
+  Connection,
 } from '@solana/web3.js';
 import { SolendAdapter } from './solend-adapter';
-import { AtomicArbitrageConfig, FlashLoanResult } from './types';
+import { JupiterLendAdapter } from './jupiter-lend-adapter';
+import { AtomicArbitrageConfig, FlashLoanResult, FlashLoanProtocol } from './types';
 
 /**
  * 闪电贷交易构建器
@@ -27,6 +29,9 @@ export class FlashLoanTransactionBuilder {
    * 3. 闪电还款指令
    * 
    * 所有指令必须在同一个交易中，确保原子性
+   * 
+   * ⚠️ 注意：对于Jupiter Lend，必须先调用JupiterLendAdapter.buildFlashLoanInstructions()
+   *          获取指令，然后传入config.flashLoanInstructions
    */
   static buildAtomicArbitrageTx(
     config: AtomicArbitrageConfig,
@@ -37,29 +42,36 @@ export class FlashLoanTransactionBuilder {
     const instructions: TransactionInstruction[] = [];
 
     if (config.useFlashLoan && config.flashLoanConfig) {
-      const { amount, tokenMint } = config.flashLoanConfig;
-      
-      // 推断代币符号（简化版，实际应该查表）
-      let tokenSymbol = 'USDC';
-      if (tokenMint.equals(new PublicKey('So11111111111111111111111111111111111111112'))) {
-        tokenSymbol = 'SOL';
-      } else if (tokenMint.equals(new PublicKey('Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'))) {
-        tokenSymbol = 'USDT';
+      // 如果提供了预构建的闪电贷指令（Jupiter Lend），直接使用
+      if (config.flashLoanInstructions) {
+        instructions.push(config.flashLoanInstructions.borrowInstruction);
+        instructions.push(...config.arbitrageInstructions);
+        instructions.push(config.flashLoanInstructions.repayInstruction);
+      } else {
+        // 否则使用Solend（向后兼容）
+        const { amount, tokenMint } = config.flashLoanConfig;
+        
+        // 推断代币符号（简化版，实际应该查表）
+        let tokenSymbol = 'USDC';
+        if (tokenMint.equals(new PublicKey('So11111111111111111111111111111111111111112'))) {
+          tokenSymbol = 'SOL';
+        } else if (tokenMint.equals(new PublicKey('Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'))) {
+          tokenSymbol = 'USDT';
+        }
+
+        // 1. 构建Solend闪电贷
+        const flashLoan = SolendAdapter.buildFlashLoan(
+          amount,
+          tokenSymbol,
+          userTokenAccount,
+          config.wallet
+        );
+
+        // 2. 组装指令
+        instructions.push(flashLoan.borrowInstruction);
+        instructions.push(...config.arbitrageInstructions);
+        instructions.push(flashLoan.repayInstruction);
       }
-
-      // 1. 构建闪电贷
-      const flashLoan = SolendAdapter.buildFlashLoan(
-        amount,
-        tokenSymbol,
-        userTokenAccount,
-        config.wallet
-      );
-
-      // 2. 组装指令
-      instructions.push(flashLoan.borrowInstruction);
-      instructions.push(...config.arbitrageInstructions);
-      instructions.push(flashLoan.repayInstruction);
-
     } else {
       // 不使用闪电贷，直接套利
       instructions.push(...config.arbitrageInstructions);

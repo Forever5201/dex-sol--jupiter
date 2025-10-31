@@ -13,7 +13,6 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { createLogger } from '@solana-arb-bot/core';
-import { JupiterApi } from '@jup-ag/api';
 
 const logger = createLogger('JupiterManager');
 
@@ -22,6 +21,8 @@ export interface JupiterServerConfig {
   rpcUrl: string;
   /** 服务端口 */
   port: number;
+  /** Jupiter API Base URL */
+  baseUrl?: string;
   /** Jupiter CLI 版本 */
   version?: string;
   /** 二进制文件路径 */
@@ -61,12 +62,12 @@ export class JupiterServerManager {
   private restartAttempts = 0;
   private readonly MAX_RESTART_ATTEMPTS = 5;
   private healthCheckInterval?: NodeJS.Timeout;
-  private jupiterApi: JupiterApi | null = null;
 
   constructor(config: JupiterServerConfig) {
     this.config = {
       rpcUrl: config.rpcUrl,
       port: config.port || 8080,
+      baseUrl: config.baseUrl || 'https://quote-api.jup.ag',
       version: config.version || 'v6.0.35',
       binaryPath: config.binaryPath || './bin/jupiter-cli',
       enableCircularArbitrage: config.enableCircularArbitrage !== false,
@@ -100,14 +101,8 @@ export class JupiterServerManager {
       return;
     }
 
-    logger.info('Starting Jupiter Server (using official SDK)...', {
-      baseUrl: this.config.baseUrl || 'https://quote-api.jup.ag',
-    });
-
-    // 初始化 Jupiter API 客户端
-    this.jupiterApi = new JupiterApi({
-      baseUrl: this.config.baseUrl || 'https://quote-api.jup.ag',
-      timeout: this.config.timeout || 30000,
+    logger.info('Starting Jupiter Server (using public API)...', {
+      baseUrl: this.config.baseUrl,
     });
 
     // 测试连接
@@ -116,7 +111,7 @@ export class JupiterServerManager {
     this.isRunning = true;
     this.startTime = Date.now();
     this.restartAttempts = 0;
-    logger.info('✅ Jupiter Server started (SDK mode)');
+    logger.info('✅ Jupiter Server started (API mode)');
   }
 
   /**
@@ -125,7 +120,7 @@ export class JupiterServerManager {
   private async testConnection(): Promise<void> {
     try {
       // 测试基本连接
-      const response = await axios.get(`${this.config.baseUrl || 'https://quote-api.jup.ag'}/v6/tokens`, {
+      const response = await axios.get(`${this.config.baseUrl}/v6/tokens`, {
         timeout: 10000,
       });
       

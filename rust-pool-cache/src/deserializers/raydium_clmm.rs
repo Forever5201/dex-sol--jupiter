@@ -5,7 +5,10 @@ use crate::dex_interface::{DexPool, DexError};
 /// Raydium CLMM (Concentrated Liquidity Market Maker) Pool State
 /// 
 /// CLMM pools use concentrated liquidity similar to Uniswap V3
-/// Data length: approximately 1728 bytes
+/// Data length: 1544 bytes (verified from on-chain data 2025-10-28)
+/// 
+/// Note: Previous assumption of 1728 bytes was incorrect.
+/// Actual structure is 184 bytes smaller.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct RaydiumClmmPoolState {
     /// Bump seed for PDA
@@ -64,6 +67,9 @@ pub struct RaydiumClmmPoolState {
     /// Tick spacing (for price ranges)
     pub tick_spacing: u16,
     
+    /// Padding for alignment (2 bytes)
+    pub _padding0: u16,
+    
     /// Liquidity
     pub liquidity: u128,
     
@@ -100,8 +106,33 @@ pub struct RaydiumClmmPoolState {
     /// Open time
     pub open_time: u64,
     
-    /// Padding/reserved space
-    pub padding: [u64; 32],
+    /// Recent epoch
+    pub recent_epoch: u64,
+    
+    /// Padding/reserved space  
+    /// Actual size calculation:
+    /// - bump: 1
+    /// - 10 Pubkeys: 320
+    /// - protocol_fees: 16
+    /// - swap amounts (4 u128): 64
+    /// - status fields: 2
+    /// - decimals: 2
+    /// - tick_spacing: 2
+    /// - _padding0: 2
+    /// - liquidity: 16
+    /// - tick_current: 4
+    /// - fee rates: 8
+    /// - tick_array_bitmap: 128
+    /// - fees fields: 48
+    /// - time fields: 16
+    /// Total so far: 629 bytes
+    /// Target: 1544 bytes
+    /// Padding needed: 1544 - 629 = 915 bytes
+    /// 
+    /// 🚨 Critical fix: Use byte array instead of u64 array
+    /// Borsh deserialization requires exact byte-level matching
+    /// u64 arrays have alignment requirements that may not match on-chain layout
+    pub padding: [u8; 915],
 }
 
 #[allow(dead_code)]
@@ -182,6 +213,7 @@ mod tests {
             mint_decimals_0: 9,
             mint_decimals_1: 6,
             tick_spacing: 10,
+            _padding0: 0,
             liquidity: 1_000_000_000_000,
             tick_current: 0,
             protocol_fee_rate: 300,
@@ -194,7 +226,8 @@ mod tests {
             fund_fees_token_0: 0,
             fund_fees_token_1: 0,
             open_time: 1000000,
-            padding: [0; 32],
+            recent_epoch: 0,
+            padding: [0; 915],
         };
         
         let price = pool.calculate_price();
@@ -242,7 +275,10 @@ impl DexPool for RaydiumClmmPoolState {
     }
     
     fn is_active(&self) -> bool {
-        self.is_open()
+        // CLMM池子只要有liquidity就是active
+        // 不依赖status字段，因为有些池子status可能不是标准值
+        // 但仍然有流动性和正常交易
+        self.liquidity > 0
     }
     
     fn get_additional_info(&self) -> Option<String> {

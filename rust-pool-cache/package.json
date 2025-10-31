@@ -1,0 +1,54 @@
+{
+  "name": "meteora-dlmm-analyzer",
+  "version": "1.0.0",
+  "description": "Meteora DLMM structure analyzer and IDL tools",
+  "scripts": {
+    "fetch-idl": "tsx tools/fetch-meteora-idl.ts",
+    "analyze-account": "tsx tools/analyze-meteora-account.ts",
+    "fix-meteora": "npm run analyze-account && npm run fetch-idl && cargo test --test struct_size_validation"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.29.0",
+    "@solana/web3.js": "1.98.4",
+    "https-proxy-agent": "^7.0.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.22",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -7,12 +7,17 @@ use crate::dex_interface::{DexPool, DexError};
 /// HumidiFi is a Solana-based DEX
 /// 
 /// Program ID: 9H6tua7jkLhdm3w8BvgpTn5LZNU7g4ZynDmCiNN3q6Rp
-/// Data size: 1728 bytes (same as SolFi V2)
+/// Data size: 1728 bytes (same structure size as SolFi V2, but different data layout)
 /// 
-/// Structure likely similar to SolFi V2:
-/// - 5 u64 header fields (40 bytes)
-/// - 25 Pubkey fields (800 bytes)
-/// - 111 u64 configuration/reserve fields (888 bytes)
+/// ⚠️ CRITICAL DIFFERENCE from SolFi V2:
+/// - All config_fields are 0 (verified 2025-10-28)
+/// - Reserves are stored in external vault accounts
+/// - Must use vault reading to get actual reserves
+/// 
+/// Structure:
+/// - 5 u64 header fields (40 bytes) - contains large encoded values
+/// - 25 Pubkey fields (800 bytes) - pubkey_4 and pubkey_5 are vaults
+/// - 111 u64 configuration/reserve fields (888 bytes) - ALL ZEROS
 #[derive(Debug, Clone, BorshDeserialize, BorshSerialize)]
 pub struct HumidiFiPoolState {
     /// Header fields (5 u64 = 40 bytes)
@@ -54,27 +59,33 @@ pub struct HumidiFiPoolState {
 }
 
 impl HumidiFiPoolState {
-    /// Get reserve A amount (searching in config fields)
+    /// Get token A vault address
+    pub fn token_a_vault(&self) -> &Pubkey {
+        &self.pubkey_4
+    }
+    
+    /// Get token B vault address
+    pub fn token_b_vault(&self) -> &Pubkey {
+        &self.pubkey_5
+    }
+    
+    /// Get reserve A amount
+    /// ⚠️ WARNING: HumidiFi pools DO NOT store reserves in pool account
+    /// Real reserves must be read from token vault accounts
+    /// 
+    /// Analysis shows all config_fields are 0, meaning vault reading is required
     pub fn get_reserve_a(&self) -> u64 {
-        // Search for reasonable reserve values
-        for i in 0..30 {
-            let val = self.config_fields[i];
-            if val > 100_000_000 && val < 100_000_000_000_000 {
-                return val;
-            }
-        }
+        // HumidiFi stores reserves in external vault accounts
+        // All config_fields are 0 (verified 2025-10-28)
+        // Must read from vault accounts
         0
     }
     
     /// Get reserve B amount
+    /// ⚠️ WARNING: Must read from vault (see get_reserve_a documentation)
     pub fn get_reserve_b(&self) -> u64 {
-        let reserve_a = self.get_reserve_a();
-        for i in 1..30 {
-            let val = self.config_fields[i];
-            if val > 100_000_000 && val < 100_000_000_000_000 && val != reserve_a {
-                return val;
-            }
-        }
+        // HumidiFi does not store reserves in pool account
+        // Must read from vault accounts
         0
     }
     
@@ -136,16 +147,24 @@ impl DexPool for HumidiFiPoolState {
     }
     
     fn is_active(&self) -> bool {
-        self.get_reserve_a() > 0 || self.get_reserve_b() > 0
+        // ✅ CORRECT: HumidiFi 使用Vault模式，储备量在外部vault账户中
+        // 检查vault地址是否有效（虽然HumidiFi已禁用，但保持代码正确性）
+        self.token_a_vault() != &Pubkey::default() && 
+        self.token_b_vault() != &Pubkey::default()
     }
     
     fn get_additional_info(&self) -> Option<String> {
-        let (res_a, res_b) = self.get_reserves_formatted();
         Some(format!(
-            "Reserves: A={:.2}, B={:.2}",
-            res_a,
-            res_b
+            "Vault Reading Mode - Header[0]={}, Header[1]={}",
+            self.header_field_1,
+            self.header_field_2
         ))
+    }
+    
+    fn get_vault_addresses(&self) -> Option<(Pubkey, Pubkey)> {
+        // HumidiFi stores reserves in external vault accounts
+        // Return vault addresses so system can subscribe and read actual balances
+        Some((*self.token_a_vault(), *self.token_b_vault()))
     }
 }
 

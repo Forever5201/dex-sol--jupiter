@@ -78,6 +78,9 @@ pub enum DexError {
     /// Data length mismatch
     #[allow(dead_code)]
     DataLengthMismatch { expected: usize, actual: usize },
+    
+    /// Validation failed (e.g., struct size mismatch)
+    ValidationFailed(String),
 }
 
 impl fmt::Display for DexError {
@@ -97,6 +100,9 @@ impl fmt::Display for DexError {
             }
             DexError::DataLengthMismatch { expected, actual } => {
                 write!(f, "Data length mismatch: expected {}, got {}", expected, actual)
+            }
+            DexError::ValidationFailed(msg) => {
+                write!(f, "Validation failed: {}", msg)
             }
         }
     }

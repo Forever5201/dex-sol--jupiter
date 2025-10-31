@@ -53,7 +53,7 @@
     "decimals": 9,
     "priority": 3,
     "enabled": false,
-    "description": "Marinade Staked SOL - 高流动性质押衍生品 ⭐⭐⭐⭐ 🔥 暂时禁用：Ultra API无taker参数时对10 SOL大额查询返回'No route found'"
+    "description": "Marinade Staked SOL - 高流动性质押衍生品 ⭐⭐⭐⭐⭐ 🔥 已启用LST套利：折价套利、多DEX价差、三角套利"
   },
   {
     "symbol": "jitoSOL",
@@ -61,7 +61,7 @@
     "decimals": 9,
     "priority": 4,
     "enabled": false,
-    "description": "Jito Staked SOL - 与Jito执行器协同 ⭐⭐⭐⭐⭐ 🔥 暂时禁用：Ultra API无taker参数时对10 SOL大额查询返回'No route found'"
+    "description": "Jito Staked SOL - 与Jito执行器协同 ⭐⭐⭐⭐⭐ 🔥 已启用LST套利：即时赎回、多DEX价差、三角套利"
   }
 ]
 

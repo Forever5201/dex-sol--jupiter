@@ -1,0 +1,195 @@
+
+╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║   🦀 Solana Pool Cache - Prototype Version 0.1.0          ║
+║                                                           ║
+║   Real-time WebSocket subscription to Raydium pools      ║
+║   Measuring latency and validating Borsh deserialization ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝
+
+[2m2025-10-31T03:54:00.657373Z[0m [32m INFO[0m Loading configuration from: config.toml
+[2m2025-10-31T03:54:00.658166Z[0m [32m INFO[0m Configuration loaded successfully
+[2m2025-10-31T03:54:00.658293Z[0m [32m INFO[0m WebSocket URL: wss://mainnet.helius-rpc.com/?api-key=d261c4a1-fffe-4263-b0ac-a667c05b5683
+[2m2025-10-31T03:54:00.658390Z[0m [32m INFO[0m Pools to monitor: 29
+[2m2025-10-31T03:54:00.658489Z[0m [32m INFO[0m   - SOL/USDC (Raydium V4) (58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2)
+[2m2025-10-31T03:54:00.658593Z[0m [32m INFO[0m   - SOL/USDT (Raydium V4) (7XawhbbxtsRcQA8KTkHT9f9nc6d69UwqCDh6U5EEbEmX)
+[2m2025-10-31T03:54:00.658782Z[0m [32m INFO[0m   - USDC/USDT (Raydium V4) (77quYg4MGneUdjgXCunt9GgM1usmrxKY31twEy3WHwcS)
+[2m2025-10-31T03:54:00.658909Z[0m [32m INFO[0m   - BTC/USDC (Raydium V4) (AVs9TA4nWDzfPJE9gGVNJMVhcQy3V9PGazuz33BfG2RA)
+[2m2025-10-31T03:54:00.659020Z[0m [32m INFO[0m   - ETH/USDC (Raydium V4) (EoNrn8iUhwgJySD1pHu8Qxm5gSQqLK3za4m8xzD2RuEb)
+[2m2025-10-31T03:54:00.659112Z[0m [32m INFO[0m   - ETH/SOL (Raydium V4) (He3iAEV5rYjv6Xf7PxKro19eVrC3QAcdic5CF2D2obPt)
+[2m2025-10-31T03:54:00.659200Z[0m [32m INFO[0m   - RAY/USDC (Raydium V4) (6UmmUiYoBjSrhakAobJw8BvkmJtDVxaeBtbt7rxWo1mg)
+[2m2025-10-31T03:54:00.659288Z[0m [32m INFO[0m   - RAY/SOL (Raydium V4) (C6tp2RVZnxBPFbnAsfTjis8BN9tycESAT4SgDQgbbrsA)
+[2m2025-10-31T03:54:00.659574Z[0m [32m INFO[0m   - WIF/SOL (Raydium V4) (EP2ib6dYdEeqD8MfE2ezHCxX3kP3K2eLKkirfPm5eyMx)
+[2m2025-10-31T03:54:00.659727Z[0m [32m INFO[0m   - USDT/USDC (AlphaQ) (Pi9nzTjPxD8DsRfRBGfKYzmefJoJM8TcXu2jyaQjSHm)
+[2m2025-10-31T03:54:00.659861Z[0m [32m INFO[0m   - USDC/USD1 (AlphaQ) (9xPhpwq6GLUkrDBNfXCbnSP9ARAMMyUQqgkrqaDW6NLV)
+[2m2025-10-31T03:54:00.659979Z[0m [32m INFO[0m   - USDS/USDC (AlphaQ) (6R3LknvRLwPg7c8Cww7LKqBHRDcGioPoj29uURX9anug)
+[2m2025-10-31T03:54:00.660092Z[0m [32m INFO[0m   - SOL/USDC (Lifinity V2) (DrRd8gYMJu9XGxLhwTCPdHNLXCKHsxJtMpbn62YqmwQe)
+[2m2025-10-31T03:54:00.660205Z[0m [32m INFO[0m   - SOL/USDT (Lifinity V2) (5zvhFRN45j9oePohUQ739Z4UaSrgPoJ8NLaS2izFuX1j)
+[2m2025-10-31T03:54:00.660323Z[0m [32m INFO[0m   - USDC/SOL (TesseraV) (FLckHLGMJy5gEoXWwcE68Nprde1D4araK4TGLw4pQq2n)
+[2m2025-10-31T03:54:00.660427Z[0m [32m INFO[0m   - USD1/USDC (Stabble) (Fukxeqx33iqRanxqsAcoGfTqbcJbVdu1aoU3zorSobbT)
+[2m2025-10-31T03:54:00.660522Z[0m [32m INFO[0m   - USD1/USDC (Stabble) #2 (BqLJmoxkcetgwwybit9XksNTuPzeh7SpxkYExbZKmLEC)
+[2m2025-10-31T03:54:00.660655Z[0m [32m INFO[0m   - USDC/USDT (PancakeSwap) (22HUWiJaTNph96KQTKZVy2wg8KzfCems5nyW7E5H5J6w)
+[2m2025-10-31T03:54:00.660784Z[0m [32m INFO[0m   - SOL/USDC (Phoenix) (4DoNfFBfF7UokCC2FQzriy7yHK6DY6NVdYpuekQ5pRgg)
+[2m2025-10-31T03:54:00.660881Z[0m [32m INFO[0m   - BONK/USDC (Phoenix) (GBMoNx84HsFdVK63t8BZuDgyZhSBaeKWB4pHHpoeRM9z)
+[2m2025-10-31T03:54:00.660972Z[0m [32m INFO[0m   - mSOL/SOL (Phoenix) (FZRgpfpvicJ3p23DfmZuvUgcQZBHJsWScTf2N2jK8dy6)
+[2m2025-10-31T03:54:00.661066Z[0m [32m INFO[0m   - SOL/USDT (Phoenix) (3J9LfemPBLowAJgpG3YdYPB9n6pUk7HEjwgS6Y5ToSFg)
+[2m2025-10-31T03:54:00.661154Z[0m [32m INFO[0m   - SOL/mSOL (Raydium CLMM) (8EzbUfvcRT1Q6RL462ekGkgqbxsPmwC5FMLQZhSPMjJ3)
+[2m2025-10-31T03:54:00.661241Z[0m [32m INFO[0m   - mSOL/USDC (Raydium CLMM) (GNfeVT5vSWgLYtzveexZJ2Ki9NBtTTzoHAd9oGvoJKW8)
+[2m2025-10-31T03:54:00.661391Z[0m [32m INFO[0m   - SOL/jitoSOL (Raydium CLMM) (2uoKbPEidR7KAMYtY4x7xdkHXWqYib5k4CutJauSL3Mc)
+[2m2025-10-31T03:54:00.661478Z[0m [32m INFO[0m   - SOL/USDC (Raydium CLMM 0.02%) (CYbD9RaToYMtWKA7QZyoLahnHdWq553Vm62Lh6qWtuxq)
+[2m2025-10-31T03:54:00.661570Z[0m [32m INFO[0m   - SOL/USDC (Meteora DLMM) (ARwi1S4DaiTG5DX7S4M4ZsrXqpMD1MrTmbu9ue2tpmEq)
+[2m2025-10-31T03:54:00.661663Z[0m [32m INFO[0m   - USDC/USDT (SolFi V2) (65ZHSArs5XxPseKQbB1B4r16vDxMWnCxHMzogDAqiDUc)
+[2m2025-10-31T03:54:00.661748Z[0m [32m INFO[0m   - USDC/SOL (GoonFi) (4uWuh9fC7rrZKrN8ZdJf69MN1e2S7FPpMqcsyY1aof6K)
+[2m2025-10-31T03:54:00.661852Z[0m [32m INFO[0m Proxy: disabled
+🚀 Initializing pools via RPC batch query...
+   RPC endpoints: 1
+   Pools to query: 29
+   Batch size: 27
+   Max retries: 3
+[2m2025-10-31T03:54:00.662808Z[0m [32m INFO[0m 🚀 Pool initializer created with 1 RPC endpoint(s)
+[2m2025-10-31T03:54:00.662953Z[0m [32m INFO[0m 🔍 Fetching 29 pool accounts via RPC...
+[2m2025-10-31T03:54:01.422818Z[0m [32m INFO[0m ✅ Fetched 28/29 valid pool accounts (attempt 1/4)
+[2m2025-10-31T03:54:01.423295Z[0m [32m INFO[0m    ✅ Activated: SOL/USDC (Raydium V4) (Raydium AMM V4)
+[2m2025-10-31T03:54:01.423505Z[0m [32m INFO[0m    ✅ Activated: SOL/USDT (Raydium V4) (Raydium AMM V4)
+[2m2025-10-31T03:54:01.423859Z[0m [32m INFO[0m    ✅ Activated: USDC/USDT (Raydium V4) (Raydium AMM V4)
+[2m2025-10-31T03:54:01.424107Z[0m [32m INFO[0m    ✅ Activated: BTC/USDC (Raydium V4) (Raydium AMM V4)
+[2m2025-10-31T03:54:01.424435Z[0m [32m INFO[0m    ✅ Activated: ETH/USDC (Raydium V4) (Raydium AMM V4)
+[2m2025-10-31T03:54:01.424703Z[0m [32m INFO[0m    ✅ Activated: ETH/SOL (Raydium V4) (Raydium AMM V4)
+[2m2025-10-31T03:54:01.424851Z[0m [32m INFO[0m    ✅ Activated: RAY/USDC (Raydium V4) (Raydium AMM V4)
+[2m2025-10-31T03:54:01.425023Z[0m [32m INFO[0m    ✅ Activated: RAY/SOL (Raydium V4) (Raydium AMM V4)
+[2m2025-10-31T03:54:01.425318Z[0m [32m INFO[0m    ✅ Activated: WIF/SOL (Raydium V4) (Raydium AMM V4)
+[2m2025-10-31T03:54:01.425596Z[0m [32m INFO[0m    ✅ Activated: USDT/USDC (AlphaQ) (AlphaQ)
+[2m2025-10-31T03:54:01.425811Z[0m [32m INFO[0m    ✅ Activated: USDC/USD1 (AlphaQ) (AlphaQ)
+[2m2025-10-31T03:54:01.425914Z[0m [32m INFO[0m    ✅ Activated: USDS/USDC (AlphaQ) (AlphaQ)
+[2m2025-10-31T03:54:01.426012Z[0m [32m INFO[0m    ✅ Activated: SOL/USDC (Lifinity V2) (Lifinity V2)
+[2m2025-10-31T03:54:01.426100Z[0m [32m INFO[0m    ✅ Activated: SOL/USDT (Lifinity V2) (Lifinity V2)
+[2m2025-10-31T03:54:01.426353Z[0m [32m INFO[0m    ✅ Activated: USDC/SOL (TesseraV) (TesseraV)
+[2m2025-10-31T03:54:01.426539Z[0m [32m INFO[0m    ❌ Not found: USD1/USDC (Stabble)
+[2m2025-10-31T03:54:01.426794Z[0m [32m INFO[0m    ✅ Activated: USD1/USDC (Stabble) #2 (Stabble)
+[2m2025-10-31T03:54:01.427044Z[0m [32m INFO[0m    ✅ Activated: USDC/USDT (PancakeSwap) (PancakeSwap)
+[2m2025-10-31T03:54:01.427362Z[0m [32m INFO[0m    ✅ Activated: SOL/USDC (Phoenix) (Phoenix (CLOB-Full))
+[2m2025-10-31T03:54:01.427549Z[0m [32m INFO[0m    ✅ Activated: BONK/USDC (Phoenix) (Phoenix (CLOB-Full))
+[2m2025-10-31T03:54:01.427647Z[0m [32m INFO[0m    ✅ Activated: mSOL/SOL (Phoenix) (Phoenix (CLOB-Full))
+[2m2025-10-31T03:54:01.427777Z[0m [32m INFO[0m    ✅ Activated: SOL/USDT (Phoenix) (Phoenix (CLOB-Full))
+[2m2025-10-31T03:54:01.427886Z[0m [32m INFO[0m    ✅ Activated: SOL/mSOL (Raydium CLMM) (Raydium CLMM)
+[2m2025-10-31T03:54:01.427980Z[0m [32m INFO[0m    ✅ Activated: mSOL/USDC (Raydium CLMM) (Raydium CLMM)
+[2m2025-10-31T03:54:01.428070Z[0m [32m INFO[0m    ✅ Activated: SOL/jitoSOL (Raydium CLMM) (Raydium CLMM)
+[2m2025-10-31T03:54:01.428158Z[0m [32m INFO[0m    ✅ Activated: SOL/USDC (Raydium CLMM 0.02%) (Raydium CLMM)
+[2m2025-10-31T03:54:01.428254Z[0m [32m INFO[0m    ⚠️  Inactive: SOL/USDC (Meteora DLMM) (no reserves)
+[2m2025-10-31T03:54:01.428354Z[0m [32m INFO[0m    ✅ Activated: USDC/USDT (SolFi V2) (SolFi V2)
+[2m2025-10-31T03:54:01.428500Z[0m [32m INFO[0m    ⚠️  Inactive: USDC/SOL (GoonFi) (no reserves)
+✅ Initialized 26/29 pools successfully
+
+🗄️  Initializing database...
+[2m2025-10-31T03:54:01.429478Z[0m [32m INFO[0m Connecting to database...
+[2m2025-10-31T03:54:01.474813Z[0m [32m INFO[0m Database connected successfully
+[2m2025-10-31T03:54:01.475193Z[0m [32m INFO[0m Running database migrations...
+[2m2025-10-31T03:54:01.589381Z[0m [32m INFO[0m Migrations completed
+[2m2025-10-31T03:54:01.589613Z[0m [32m INFO[0m Database: Subscription started at 2025-10-31 03:54:01.589
+
+🔌 Establishing WebSocket connection in main task...
+   URL: wss://mainnet.helius-rpc.com/?api-key=d261c4a1-fffe-4263-b0ac-a667c05b5683
+🔌 Connecting directly to wss://mainnet.helius-rpc.com/?api-key=d261c4a1-fffe-4263-b0ac-a667c05b5683...
+⏳ Connection timeout: 30 seconds
+DEBUG: Creating connect_async future...
+DEBUG: Calling timeout().await...
+DEBUG: timeout() returned Ok
+DEBUG: Checking connection result...
+✅ WebSocket connected! Status: 101
+✅ WebSocket connected successfully!
+[2m2025-10-31T03:54:02.602096Z[0m [32m INFO[0m Initializing WebSocket client...
+[2m2025-10-31T03:54:02.602365Z[0m [32m INFO[0m Starting WebSocket message processing task...
+📊 Starting metrics reporting task...
+⚡ Starting advanced arbitrage router with Bellman-Ford + DP optimization...
+[2m2025-10-31T03:54:02.602763Z[0m [32m INFO[0m 🎯 Initializing on-chain simulator...
+🎯 Event-Driven Router initialized:
+   Mode: Complete
+   Min ROI: 0.1%
+   Max hops: 6
+   Split optimization: true
+   Debounce: 100ms
+   Trigger threshold: 0.05%
+   Validation: immediate
+   Max concurrent: 3
+   Algorithms: Bellman-Ford + Dynamic Programming + Quick Scan
+   Expected coverage: 100% opportunities, 100% profit
+
+📨 Starting message processing with pre-connected stream
+[2m2025-10-31T03:54:02.602859Z[0m [32m INFO[0m    RPC URL: https://mainnet.helius-rpc.com/?api-key=d261c4a1-f
+[2m2025-10-31T03:54:02.604299Z[0m [32m INFO[0m    Min confidence: 80.0%
+[2m2025-10-31T03:54:02.604424Z[0m [32m INFO[0m    Max concurrent: 10
+[2m2025-10-31T03:54:02.604557Z[0m [32m INFO[0m Waiting for pool updates from 29 pools...
+[2m2025-10-31T03:54:02.604625Z[0m [32m INFO[0m Starting HTTP API server on port 3001...
+
+✅ All tasks started successfully!
+
+[2m2025-10-31T03:54:02.604831Z[0m [32m INFO[0m 🌐 Dynamic vault subscription enabled
+
+💓 Event loop heartbeat:
+   Events processed: 0
+   Events filtered: 0
+   Scans triggered: 0
+   Status: Waiting for significant price changes (>0.05%)...
+
+
+┌───────────────────────────────────────────────────────┐
+│  Statistics - Last 60 seconds                       │
+├───────────────────────────────────────────────────────┤
+│  Total Updates:            0                         │
+│  Update Rate:           0.00 updates/sec             │
+├───────────────────────────────────────────────────────┤
+│  Latency (microseconds):                            │
+│    Average:                0 μs (0.00 ms)          │
+│    Min:                    0 μs (0.00 ms)          │
+│    P50:                    0 μs (0.00 ms)          │
+│    P95:                    0 μs (0.00 ms)          │
+│    P99:                    0 μs (0.00 ms)          │
+│    Max:                    0 μs (0.00 ms)          │
+└───────────────────────────────────────────────────────┘
+
+🌐 HTTP API server listening on http://0.0.0.0:3001
+   Endpoints:
+     GET  /health
+     GET  /prices
+     GET  /prices/:pair
+     POST /scan-arbitrage       (Legacy)
+     POST /scan-validated       🎯 Recommended: With validation
+     GET  /errors
+     GET  /data-quality         📊 Data consistency stats
+[2m2025-10-31T03:54:03.124792Z[0m [32m INFO[0m Pool price updated (significant change) [3mpool[0m[2m=[0mUSDC/SOL (TesseraV) [3mdex[0m[2m=[0mTesseraV [3mprice[0m[2m=[0m0.01084669227709331 [3mbase_reserve[0m[2m=[0m21474.83648005 [3mquote_reserve[0m[2m=[0m232.930943 [3mlatency_us[0m[2m=[0m56 [3mslot[0m[2m=[0m376928139
+[2m2025-10-31T03:54:03.125226Z[0m [32m INFO[0m Pool requires vault data, subscribing and waiting for vault updates... [3mpool[0m[2m=[0mUSDC/USDT (SolFi V2)
+🌐 [USDC/USDT (SolFi V2)] Detected vault addresses:
+   ├─ Vault A: Ge5cHjX8B4GPpyQXsrMHT5mYnKmXXMUbVA5KonsBcuyj
+   └─ Vault B: CTnZGCPAN9wrWkfJqmpWzS6NhsM9h2E3jC4S99mCrPWj
+   ✅ Vault subscription requests sent!
+[2m2025-10-31T03:54:03.126087Z[0m [32m INFO[0m Fetching vault initial data via RPC... [3mpool[0m[2m=[0mUSDC/USDT (SolFi V2)
+[2m2025-10-31T03:54:03.126249Z[0m [32m INFO[0m 🌐 Subscribed to vault Ge5cHjX8 for pool USDC/USDT (SolFi V2)
+[2m2025-10-31T03:54:03.126483Z[0m [32m INFO[0m 🌐 Subscribed to vault CTnZGCPA for pool USDC/USDT (SolFi V2)
+[2m2025-10-31T03:54:03.126778Z[0m [32m INFO[0m 🔍 Fetching initial data for vault Ge5cHjX8 (USDC/USDT (SolFi V2))
+[2m2025-10-31T03:54:03.666480Z[0m [32m INFO[0m 🔍 Fetching initial data for vault CTnZGCPA (USDC/USDT (SolFi V2))
+[2m2025-10-31T03:54:04.267537Z[0m [32m INFO[0m Pool requires vault data, subscribing and waiting for vault updates... [3mpool[0m[2m=[0mSOL/USDC (Phoenix)
+🌐 [SOL/USDC (Phoenix)] Detected vault addresses:
+   ├─ Vault A: 8g4Z9d6PqGkgH31tMW6FwxGhwYJrXpxZHQrkikpLJKrG
+   └─ Vault B: 3HSYXeGc3LjEPCuzoNDjQN37F1ebsSiR4CqXVqQCdekZ
+   ✅ Vault subscription requests sent!
+[2m2025-10-31T03:54:04.268563Z[0m [32m INFO[0m Fetching vault initial data via RPC... [3mpool[0m[2m=[0mSOL/USDC (Phoenix)
+[2m2025-10-31T03:54:04.269061Z[0m [32m INFO[0m 🌐 Subscribed to vault 8g4Z9d6P for pool SOL/USDC (Phoenix)
+[2m2025-10-31T03:54:04.269322Z[0m [32m INFO[0m 🌐 Subscribed to vault 3HSYXeGc for pool SOL/USDC (Phoenix)
+[2m2025-10-31T03:54:04.269522Z[0m [32m INFO[0m ✅ Vault subscription confirmed: request_id=10030, subscription_id=6937864, vault=Ge5cHjX8
+[2m2025-10-31T03:54:04.269705Z[0m [32m INFO[0m ✅ Vault subscription confirmed: request_id=10031, subscription_id=6937865, vault=CTnZGCPA
+[2m2025-10-31T03:54:04.269937Z[0m [32m INFO[0m 🔍 Fetching initial data for vault 8g4Z9d6P (SOL/USDC (Phoenix))
+[2m2025-10-31T03:54:04.269985Z[0m [32m INFO[0m Pool price updated (significant change) [3mpool[0m[2m=[0mUSDS/USDC (AlphaQ) [3mdex[0m[2m=[0mAlphaQ [3mprice[0m[2m=[0m1.7999820001799982 [3mbase_reserve[0m[2m=[0m1000010 [3mquote_reserve[0m[2m=[0m1800000 [3mlatency_us[0m[2m=[0m7 [3mslot[0m[2m=[0m376928142
+[2m2025-10-31T03:54:04.270285Z[0m [32m INFO[0m Pool price updated (significant change) [3mpool[0m[2m=[0mUSDC/USD1 (AlphaQ) [3mdex[0m[2m=[0mAlphaQ [3mprice[0m[2m=[0m1.7999820001799982 [3mbase_reserve[0m[2m=[0m1000010 [3mquote_reserve[0m[2m=[0m1800000 [3mlatency_us[0m[2m=[0m8 [3mslot[0m[2m=[0m376928142
+[2m2025-10-31T03:54:04.270509Z[0m [32m INFO[0m Pool price updated (significant change) [3mpool[0m[2m=[0mUSDT/USDC (AlphaQ) [3mdex[0m[2m=[0mAlphaQ [3mprice[0m[2m=[0m1.7999937000220498 [3mbase_reserve[0m[2m=[0m1000003.5 [3mquote_reserve[0m[2m=[0m1800000 [3mlatency_us[0m[2m=[0m6 [3mslot[0m[2m=[0m376928142
+[2m2025-10-31T03:54:04.349043Z[0m [32m INFO[0m Pool requires vault data, subscribing and waiting for vault updates... [3mpool[0m[2m=[0mBONK/USDC (Phoenix)
+🌐 [BONK/USDC (Phoenix)] Detected vault addresses:
+   ├─ Vault A: FbonD3DrpzRweh2Z65EVjp5wJvVnFrv89RAvp3XvtWZE
+   └─ Vault B: 5vkFwKVxAmZWgQ2b4xYJBdBzjkFvPxSCTdLeEs48BsGf
+   ✅ Vault subscription requests sent!
+[2m2025-10-31T03:54:04.349701Z[0m [32m INFO[0m Fetching vault initial data via RPC... [3mpool[0m[2m=[0mBONK/USDC (Phoenix)
+[2m2025-10-31T03:54:04.350073Z[0m [32m INFO[0m 🌐 Subscribed to vault FbonD3Dr for pool BONK/USDC (Phoenix)
+[2m2025-10-31T03:54:04.350214Z[0m [32m INFO[0m 🌐 Subscribed to vault 5vkFwKVx for pool BONK/USDC (Phoenix)
+[2m2025-10-31T03:54:04.350313Z[0m [32m INFO[0m 🔍 Fetching initial data for vault FbonD3Dr (BONK/USDC (Phoenix))
+[2m2025-10-31T03:54:04.366439Z[0m [32m INFO[0m ✅ Fetched vault 8g4Z9d6P initial data: 165 bytes
+[2m2025-10-31T03:54:04.444079Z[0m [32m INFO[0m ✅ Fetched vault FbonD3Dr initial data: 165 bytes

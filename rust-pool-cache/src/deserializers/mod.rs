@@ -2,6 +2,8 @@ pub mod raydium;
 pub mod raydium_clmm;
 pub mod lifinity_v2;
 pub mod meteora_dlmm;
+pub mod meteora_dlmm_improved;
+// pub mod meteora_dlmm_with_reserves; // 可选功能，需要时手动启用
 pub mod spl_token;
 pub mod alphaq;
 pub mod solfi_v2;
@@ -12,11 +14,17 @@ pub mod stabble;
 pub mod aquifer;
 pub mod whirlpool;
 pub mod pancakeswap;
+pub mod phoenix;
+pub mod phoenix_sdk;       // 🔥 Phoenix SDK简化版本
+pub mod phoenix_sdk_full;  // 🔥 Phoenix SDK完整版本
+pub mod openbook_v2;
 
 pub use raydium::RaydiumAmmInfo;
 pub use raydium_clmm::RaydiumClmmPoolState;
 pub use lifinity_v2::LifinityV2PoolState;
 pub use meteora_dlmm::MeteoraPoolState;
+pub use meteora_dlmm_improved::MeteoraPoolStateImproved;
+// pub use meteora_dlmm_with_reserves::MeteoraPoolStateWithReserves; // 可选功能
 pub use spl_token::TokenAccount;
 pub use alphaq::AlphaQPoolState;
 pub use solfi_v2::SolFiV2PoolState;
@@ -27,5 +35,9 @@ pub use stabble::StabblePoolState;
 pub use aquifer::AquiferPoolState;
 pub use whirlpool::WhirlpoolState;
 pub use pancakeswap::PancakeSwapPoolState;
+pub use phoenix::PhoenixMarketState;
+pub use phoenix_sdk::PhoenixMarketSDK;      // 🔥 Phoenix SDK简化版本
+pub use phoenix_sdk_full::PhoenixMarketFull; // 🔥 Phoenix SDK完整版本
+pub use openbook_v2::OpenBookMarketState;
 
 

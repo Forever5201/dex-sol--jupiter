@@ -8,6 +8,7 @@
 import { Connection, Keypair, PublicKey, clusterApiUrl } from '@solana/web3.js';
 import { LUTManager } from './manager';
 import { LUT_PRESETS, LUTPreset } from './presets';
+import { KeypairManager } from '../solana/keypair';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
@@ -40,12 +41,11 @@ function loadConfig(): CLIConfig {
 }
 
 /**
- * 加载密钥对
+ * 加载密钥对（使用统一的KeypairManager）
  */
 function loadKeypair(path: string): Keypair {
   const fullPath = resolve(process.cwd(), path);
-  const secretKey = JSON.parse(readFileSync(fullPath, 'utf-8'));
-  return Keypair.fromSecretKey(Uint8Array.from(secretKey));
+  return KeypairManager.loadFromFile(fullPath);
 }
 
 /**

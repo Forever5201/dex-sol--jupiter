@@ -6,6 +6,7 @@
  */
 
 import { Connection, PublicKey, TransactionInstruction } from '@solana/web3.js';
+import BN from 'bn.js';
 import { FlashLoanResult, FlashLoanFeeConfig, FlashLoanValidationResult } from './types';
 
 /**
@@ -30,22 +31,24 @@ export class JupiterLendAdapter {
     asset: PublicKey;
     signer: PublicKey;
   }): Promise<FlashLoanResult> {
-    // 动态导入 Jupiter Lend SDK
-    // Note: Using dynamic import to avoid TypeScript module resolution issues
-    const jupiterLend = await import('@jup-ag/lend');
-    const { getFlashBorrowIx, getFlashPaybackIx } = (jupiterLend as any).flashloan || jupiterLend;
+    // 导入 Jupiter Lend 闪电贷 SDK（0% 费用！）
+    // 官方文档：https://dev.jup.ag/docs/lend/liquidation
+    const { getFlashBorrowIx, getFlashPaybackIx } = await import('@jup-ag/lend/flashloan');
+
+    // 转换金额为 BN 类型（Jupiter SDK 要求）
+    const amountBN = new BN(params.amount);
 
     // 借款指令（0% 费用！）
     const borrowIx = await getFlashBorrowIx({
-      amount: params.amount,
+      amount: amountBN,
       asset: params.asset,
       signer: params.signer,
       connection: this.connection,
     });
 
-    // 还款指令
+    // 还款指令（0% 费用！）
     const paybackIx = await getFlashPaybackIx({
-      amount: params.amount,
+      amount: amountBN,
       asset: params.asset,
       signer: params.signer,
       connection: this.connection,

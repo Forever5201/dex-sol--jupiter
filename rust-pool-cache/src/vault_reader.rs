@@ -10,11 +10,12 @@
  * 总共增加 43% 的套利机会覆盖率
  */
 
-use crate::deserializers::TokenAccount;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::str::FromStr;
-use borsh::BorshDeserialize;
+use tracing::{debug, warn};
+use spl_token::state::Account as SplTokenAccount;
+use solana_program::program_pack::Pack;
 
 /// Vault 信息
 #[derive(Debug, Clone)]
@@ -102,17 +103,43 @@ impl VaultReader {
     /// * `Ok(amount)` - 更新成功，返回余额
     /// * `Err(error)` - 解析失败
     pub fn update_vault(&mut self, vault_address: &str, data: &[u8]) -> Result<u64, String> {
-        // 检查数据长度（SPL Token 账户是 165 字节）
-        if data.len() != 165 {
+        // 🔥 修复：支持多种数据长度
+        // SPL Token 账户: 165 字节
+        // SPL Token-2022 with Extensions: 165+ 字节
+        // 压缩/wrapped账户: 82 字节（Mint账户）
+        
+        // Handle different token account sizes
+        if data.len() == 82 {
+            // 82-byte Mint accounts should have been filtered earlier
+            debug!(vault = vault_address, len = data.len(), "Received Mint account data, skipping");
+            return Ok(0);
+        } else if data.len() < 165 {
             return Err(format!(
-                "Invalid token account size: expected 165 bytes, got {}",
+                "Invalid token account size: expected >= 165 bytes, got {}",
                 data.len()
             ));
         }
         
-        // 解析 SPL Token 账户
-        let token_account = TokenAccount::try_from_slice(data)
-            .map_err(|e| format!("Failed to parse token account: {:?}", e))?;
+        // ✅ FIX: SPL Token accounts use Pack trait, NOT Borsh!
+        // Standard SPL Token: 165 bytes
+        // Token-2022 with extensions: 165-400+ bytes (extensions are appended after base 165 bytes)
+        // We only need the first 165 bytes for the base Account structure
+        let base_data = if data.len() > 165 {
+            debug!(
+                vault = vault_address, 
+                total_len = data.len(), 
+                extensions_len = data.len() - 165,
+                "Token-2022 account with extensions detected, using base 165 bytes"
+            );
+            &data[0..165]
+        } else {
+            data
+        };
+        
+        // ⭐ CRITICAL FIX: Use spl_token::state::Account::unpack() instead of Borsh
+        // SPL Token accounts use the Pack trait for serialization, not Borsh
+        let token_account = SplTokenAccount::unpack(base_data)
+            .map_err(|e| format!("Failed to unpack SPL Token account: {:?}", e))?;
         
         // 更新 vault 信息
         if let Some(vault_info) = self.vaults.get_mut(vault_address) {
@@ -185,6 +212,23 @@ impl VaultReader {
     /// 获取池子关联的 vault 地址
     pub fn get_pool_vault_addresses(&self, pool_address: &str) -> Option<(String, String)> {
         self.pool_to_vaults.get(pool_address).cloned()
+    }
+    
+    /// 获取使用特定 vault 的所有池子地址
+    /// 
+    /// # Arguments
+    /// * `vault_address` - Vault 地址
+    /// 
+    /// # Returns
+    /// 使用该 vault 的所有池子地址列表
+    pub fn get_pools_for_vault(&self, vault_address: &str) -> Vec<String> {
+        self.pool_to_vaults
+            .iter()
+            .filter(|(_, (vault_a, vault_b))| {
+                vault_a == vault_address || vault_b == vault_address
+            })
+            .map(|(pool_addr, _)| pool_addr.clone())
+            .collect()
     }
     
     /// 获取统计信息

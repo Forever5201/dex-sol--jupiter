@@ -7,6 +7,7 @@
 use deadpool_postgres::{Config, Pool, Runtime};
 use tokio_postgres::NoTls;
 use chrono::{DateTime, Utc};
+use tracing::{info, debug};
 use crate::router::ArbitragePath;
 
 /// 数据库配置
@@ -47,8 +48,8 @@ impl DatabaseManager {
             return Err("Database is not enabled".into());
         }
 
-        println!("📊 Connecting to database...");
-        println!("   URL: {}", mask_password(&config.url));
+        info!("Connecting to database...");
+        debug!("Database URL: {}", mask_password(&config.url));
 
         // 解析连接URL
         let pg_config = config.url.parse::<tokio_postgres::Config>()?;
@@ -74,12 +75,12 @@ impl DatabaseManager {
 
         // 测试连接
         let _client = pool.get().await?;
-        println!("✅ Database connected successfully");
+        info!("Database connected successfully");
 
         // 运行迁移
-        println!("🔄 Running database migrations...");
+        info!("Running database migrations...");
         Self::run_migrations(&pool).await?;
-        println!("✅ Migrations completed");
+        info!("Migrations completed");
 
         Ok(Self {
             pool,
@@ -104,7 +105,7 @@ impl DatabaseManager {
     /// 设置订阅开始时间
     pub fn set_subscription_start(&mut self) {
         self.subscription_started_at = Some(Utc::now());
-        println!("⏰ Database: Subscription started at {}", 
+        info!("Database: Subscription started at {}", 
             self.subscription_started_at.unwrap().format("%Y-%m-%d %H:%M:%S%.3f"));
     }
 
@@ -167,7 +168,7 @@ impl DatabaseManager {
         // 记录路径详情
         self.record_path_steps(&client, opportunity_id, path).await?;
 
-        println!("📝 Recorded opportunity #{} - ROI: {:.4}% - Path: {}", 
+        debug!("Recorded opportunity #{} - ROI: {:.4}% - Path: {}", 
             opportunity_id, path.roi_percent, path_summary);
 
         Ok(opportunity_id)

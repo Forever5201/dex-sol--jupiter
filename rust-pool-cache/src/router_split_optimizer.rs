@@ -57,6 +57,7 @@ impl OptimizedPath {
 }
 
 /// 动态规划拆分优化器
+#[derive(Clone)]
 pub struct SplitOptimizer {
     /// 最大拆分数量
     #[allow(dead_code)]

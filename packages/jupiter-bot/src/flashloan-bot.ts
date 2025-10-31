@@ -21,10 +21,13 @@ import {
   JupiterLendAdapter,
   FlashLoanTransactionBuilder,
   FlashLoanProtocol,
+  SolendALTManager,
+  JupiterLendALTManager,
   networkConfig,
   initDatabase,
   databaseRecorder,
   NetworkAdapter, // 🌐 使用统一网络适配器
+  KeypairManager, // 🔑 使用统一的密钥管理器
 } from '@solana-arb-bot/core';
 // 直接从源文件导入PriorityFeeEstimator,因为它未从core/index导出
 import { PriorityFeeEstimator } from '@solana-arb-bot/core/dist/utils/priority-fee-estimator';
@@ -45,6 +48,11 @@ export interface FlashloanBotConfig {
   keypairPath: string;
   dryRun?: boolean;
   simulateToBundle?: boolean;  // 🔥 深度模拟：执行所有步骤直到发送Bundle，但不上链
+  enableSecondaryValidation?: boolean; // 是否启用二次验证（默认启用）
+
+  network?: {
+    proxyUrl?: string;
+  };
 
   // Jupiter API 配置（Ultra API）
   jupiterApi?: {
@@ -183,6 +191,11 @@ export class FlashloanBot {
     timestamp: number;
   }>();
   private readonly ALT_CACHE_TTL = 300000; // 5分钟过期
+  
+  // Flash Loan ALT Managers（根据配置使用）
+  private solendALTManager: SolendALTManager;
+  private jupiterLendALTManager: JupiterLendALTManager;
+  private jupiterLendAdapter: JupiterLendAdapter;
 
   private stats = {
     opportunitiesFound: 0,
@@ -206,6 +219,8 @@ export class FlashloanBot {
     totalLossSol: 0,
     startTime: Date.now(),
   };
+
+  private readonly secondaryValidationEnabled: boolean;
 
   /**
    * Create dedicated Jupiter Swap API client
@@ -237,7 +252,7 @@ export class FlashloanBot {
       baseURL,
       timeout: 6000,        // 提高到6秒（应对Ultra API延迟）
       headers,
-      validateStatus: (status) => status < 500,
+      validateStatus: (status: number) => status < 500,
       maxRedirects: 0,
       decompress: true,     // 🔥 自动解压
     });
@@ -251,18 +266,18 @@ export class FlashloanBot {
     const headers: any = {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
-      'Connection': 'keep-alive',
-      'Accept-Encoding': 'br, gzip, deflate',
+      'User-Agent': 'FlashloanBot/1.0',
     };
     
     // 🌐 使用 NetworkAdapter 创建 axios 实例（自动应用代理配置）
+    // ⚠️ 修正：使用 Legacy Swap API，不是 Quote API V6
+    // Legacy Swap API 是官方推荐用于 flash loan 的 API
     return NetworkAdapter.createAxios({
-      baseURL: 'https://quote-api.jup.ag/v6',  // ✅ Quote API（支持闪电贷）
-      timeout: 3000,
+      baseURL: 'https://lite-api.jup.ag/swap/v1',  // ✅ Legacy Swap API（支持闪电贷）
+      timeout: 30000,  // 增加超时时间
       headers,
-      validateStatus: (status) => status < 500,
+      validateStatus: (status: number) => status < 500,
       maxRedirects: 0,
-      decompress: true,
     });
   }
 
@@ -281,9 +296,9 @@ export class FlashloanBot {
     // 🌐 使用 NetworkAdapter 创建 axios 实例（自动应用代理配置）
     return NetworkAdapter.createAxios({
       baseURL: 'https://lite-api.jup.ag/swap/v1',  // ✅ Legacy Swap API (支持 dexes 参数)
-      timeout: 3000,
+      timeout: 20000,
       headers,
-      validateStatus: (status) => status < 500,
+      validateStatus: (status: number) => status < 500,
       maxRedirects: 0,
       decompress: true,
     });
@@ -291,13 +306,24 @@ export class FlashloanBot {
 
   constructor(config: FlashloanBotConfig) {
     this.config = config;
+    this.secondaryValidationEnabled = config.enableSecondaryValidation ?? true;
 
     // 使用统一的网络配置管理器创建连接（自动配置代理）
     this.connection = networkConfig.createConnection(config.rpcUrl, 'processed');
     logger.info(`Connected to RPC: ${config.rpcUrl}`);
 
-    // 加载钱包
-    this.keypair = this.loadKeypair(config.keypairPath);
+    // 加载钱包（智能检测：优先使用环境变量，否则使用配置文件路径）
+    // 优先级：SOLANA_PRIVATE_KEY > SOLANA_KEYPAIR_PATH > config.keypairPath
+    if (process.env.SOLANA_PRIVATE_KEY) {
+      logger.info('🔑 Using keypair from environment variable: SOLANA_PRIVATE_KEY');
+      this.keypair = KeypairManager.load();
+    } else if (process.env.SOLANA_KEYPAIR_PATH) {
+      logger.info(`🔑 Using keypair from environment variable: SOLANA_KEYPAIR_PATH=${process.env.SOLANA_KEYPAIR_PATH}`);
+      this.keypair = KeypairManager.load();
+    } else {
+      logger.info(`🔑 Using keypair from config file: ${config.keypairPath}`);
+      this.keypair = KeypairManager.load({ filePath: config.keypairPath });
+    }
     logger.info(`Wallet loaded: ${this.keypair.publicKey.toBase58()}`);
 
     // 加载代币列表
@@ -442,7 +468,16 @@ export class FlashloanBot {
 
     // Create Quote API client for building instructions (supports flash loans)
     this.jupiterQuoteAxios = this.createJupiterQuoteClient();
-    logger.info('✅ Jupiter Quote API client initialized (quote-api.jup.ag/v6 - flash loan support)');
+    logger.info('✅ Jupiter Legacy Swap API client initialized (lite-api.jup.ag/swap/v1 - flash loan support)');
+
+    // 初始化闪电贷相关组件
+    this.solendALTManager = new SolendALTManager(this.connection, this.keypair, this.config.dryRun || false);
+    this.jupiterLendALTManager = new JupiterLendALTManager(this.connection, this.keypair, this.config.dryRun || false);
+    this.jupiterLendAdapter = new JupiterLendAdapter(this.connection);
+    
+    const flashLoanProvider = this.config.flashloan.provider;
+    logger.info(`🗜️ Flash Loan Provider: ${flashLoanProvider} (${flashLoanProvider === 'jupiter-lend' ? '0% fee' : '0.09% fee'})`);
+    logger.info(`🗜️ ALT Managers created (will initialize on start)`);
 
     logger.info('💰 Flashloan Bot initialized');
   }
@@ -461,6 +496,10 @@ export class FlashloanBot {
         keypairPath: config.keypair.path,
         dryRun: config.bot.dry_run,
         simulateToBundle: config.bot.simulate_to_bundle,
+        enableSecondaryValidation: config.validation?.enable_secondary ?? true,
+        network: config.network ? {
+          proxyUrl: config.network.proxy_url,
+        } : undefined,
         jupiterApi: config.jupiter_api ? {
           apiKey: config.jupiter_api.api_key,
           validationApiKey: config.jupiter_api.validation_api_key,  // 🔥 新增：二次验证API Key
@@ -574,19 +613,6 @@ export class FlashloanBot {
     return config;
   }
 
-  /**
-   * 加载密钥对
-   */
-  private loadKeypair(path: string): Keypair {
-    try {
-      const secretKeyString = readFileSync(path, 'utf-8');
-      const secretKey = Uint8Array.from(JSON.parse(secretKeyString));
-      return Keypair.fromSecretKey(secretKey);
-    } catch (error) {
-      logger.error(`Failed to load keypair from ${path}:`, error);
-      throw error;
-    }
-  }
 
   /**
    * 加载代币列表
@@ -648,6 +674,35 @@ export class FlashloanBot {
     }
 
     logger.info('🚀 Starting Flashloan Arbitrage Bot...');
+
+    // 🗜️ 初始化闪电贷ALT（根据配置选择）
+    const isJupiterLend = this.config.flashloan.provider === 'jupiter-lend';
+    try {
+      if (isJupiterLend) {
+        logger.info('🔧 Initializing Jupiter Lend Address Lookup Table...');
+        await this.jupiterLendALTManager.initialize();
+        const altStats = this.jupiterLendALTManager.getStats();
+        if (altStats.initialized) {
+          logger.info(
+            `✅ Jupiter Lend ALT ready: ${altStats.address?.slice(0, 8)}... ` +
+            `(${altStats.addressCount} addresses, saves ~200-400 bytes per tx)`
+          );
+        } else {
+          logger.info('💡 Jupiter Lend ALT will be created on first flash loan use');
+        }
+      } else {
+        logger.info('🔧 Initializing Solend Address Lookup Table...');
+        await this.solendALTManager.initialize();
+        const altStats = this.solendALTManager.getStats();
+        logger.info(
+          `✅ Solend ALT ready: ${altStats.address?.slice(0, 8)}... ` +
+          `(${altStats.addressCount} addresses, saves ~210 bytes per tx)`
+        );
+      }
+    } catch (error: any) {
+      logger.error(`❌ Failed to initialize Flash Loan ALT: ${error.message}`);
+      logger.warn('⚠️ Bot will continue without ALT compression (transactions may be larger)');
+    }
 
     // 发送启动通知
     if (this.monitoring) {
@@ -907,7 +962,7 @@ export class FlashloanBot {
             dexes: firstOutDEX,             // ✅ 锁定 DEX（Legacy API 支持）
             restrictIntermediateTokens: true,  // 限制中间代币
           },
-          timeout: 3000,
+          timeout: 20000,
         }).then(res => {
           const secondOutboundMs = Date.now() - outboundStartTime;
           return { data: res.data, timing: secondOutboundMs };
@@ -924,7 +979,7 @@ export class FlashloanBot {
             dexes: firstBackDEX,             // ✅ 锁定 DEX
             restrictIntermediateTokens: true,
           },
-          timeout: 3000,
+          timeout: 20000,
         }).then(res => {
           const secondReturnMs = Date.now() - returnStartTime;
           return { data: res.data, timing: secondReturnMs };
@@ -1081,7 +1136,7 @@ export class FlashloanBot {
       });
       
       const quoteResponse = await this.jupiterSwapAxios.get(`/v1/order?${paramsOut}`, {
-        timeout: 3000, // Ultra API可能需要更长时间
+        timeout: 20000, // Ultra API可能需要更长时间
       });
       const secondOutboundMs = Date.now() - outboundStart;
 
@@ -1098,7 +1153,7 @@ export class FlashloanBot {
       });
       
       const backQuoteResponse = await this.jupiterSwapAxios.get(`/v1/order?${paramsBack}`, {
-        timeout: 3000,
+        timeout: 20000,
       });
       const secondReturnMs = Date.now() - returnStart;
 
@@ -1184,75 +1239,90 @@ export class FlashloanBot {
       }
     }
 
-    // 🔥 核心优化：并行执行验证（统计）和构建（执行）
+    const validationEnabled = this.secondaryValidationEnabled;
     const t0 = opportunity.discoveredAt || Date.now();
-    logger.info('🚀 Starting parallel validation (stats) + build (execution)...');
-    
-    const [revalidation, buildResult] = await Promise.all([
-      // 路径1：二次验证（仅用于统计分析，不影响执行决策）
-      this.validateOpportunityWithRouteReplication(opportunity).catch(err => {
-        logger.warn('Validation failed (non-blocking for stats):', err);
-        return {
-          stillExists: false,
-          secondProfit: 0,
-          secondRoi: 0,
-          delayMs: Date.now() - t0,
-          routeMatches: false,
-          exactPoolMatch: false,
-          secondOutboundMs: undefined,
-          secondReturnMs: undefined,
-        };
-      }),
-      
-      // 路径2：构建交易（使用Worker缓存的quote，直接执行）
-      this.buildTransactionFromCachedQuote(opportunity, opportunityId).catch(err => {
+    let revalidation: any = null;
+    let buildResult: any = null;
+
+    if (validationEnabled) {
+      logger.info('🚀 Starting parallel validation (stats) + build (execution)...');
+      [revalidation, buildResult] = await Promise.all([
+        // 路径1：二次验证（仅用于统计分析，不影响执行决策）
+        this.validateOpportunityWithRouteReplication(opportunity).catch(err => {
+          logger.warn('Validation failed (non-blocking for stats):', err);
+          return {
+            stillExists: false,
+            secondProfit: 0,
+            secondRoi: 0,
+            delayMs: Date.now() - t0,
+            routeMatches: false,
+            exactPoolMatch: false,
+            secondOutboundMs: undefined,
+            secondReturnMs: undefined,
+          };
+        }),
+
+        // 路径2：构建交易（使用Worker缓存的quote，直接执行）
+        this.buildTransactionFromCachedQuote(opportunity, opportunityId).catch(err => {
+          logger.error('Build transaction failed:', err);
+          return null;
+        }),
+      ]);
+    } else {
+      logger.info('🚀 Secondary validation disabled; building transaction immediately...');
+      buildResult = await this.buildTransactionFromCachedQuote(opportunity, opportunityId).catch(err => {
         logger.error('Build transaction failed:', err);
         return null;
-      }),
-    ]);
+      });
+    }
 
     const t1 = Date.now();
-    
-    // 📊 统计分析：记录验证结果（机会寿命、价格漂移等）
-    logger.info(
-      `📊 Validation stats: ` +
-      `lifetime=${revalidation.delayMs}ms, ` +
-      `still_exists=${revalidation.stillExists}, ` +
-      `price_drift=${((revalidation.secondProfit - opportunity.profit) / 1e9).toFixed(6)} SOL, ` +
-      `build_time=${t1 - t0}ms`
-    );
 
-    // 🔥 计算从Worker发现到验证完成的总延迟（用于数据库和微信通知）
-    const secondCheckedAt = new Date();
-    const totalValidationDelayMs = secondCheckedAt.getTime() - opportunity.timestamp;
+    if (validationEnabled && revalidation) {
+      logger.info(
+        `📊 Validation stats: ` +
+        `lifetime=${revalidation.delayMs}ms, ` +
+        `still_exists=${revalidation.stillExists}, ` +
+        `price_drift=${((revalidation.secondProfit - opportunity.profit) / 1e9).toFixed(6)} SOL, ` +
+        `build_time=${t1 - t0}ms`
+      );
+    } else {
+      logger.info(`📊 Secondary validation disabled; build_time=${t1 - t0}ms`);
+    }
 
-    // ✅ 新增：记录验证结果（包含详细延迟数据）
-    if (this.config.database?.enabled && opportunityId) {
-      try {
-        await databaseRecorder.recordOpportunityValidation({
-          opportunityId,
-          firstDetectedAt,
-          firstProfit,
-          firstRoi,
-          secondCheckedAt,
-          stillExists: revalidation.stillExists,
-          secondProfit: revalidation.stillExists ? BigInt(revalidation.secondProfit) : undefined,
-          secondRoi: revalidation.stillExists ? revalidation.secondRoi : undefined,
-          validationDelayMs: totalValidationDelayMs,  // 🔥 使用总延迟而不是查询延迟
-          // 🔥 新增：详细延迟分析数据
-          firstOutboundMs: opportunity.latency?.outboundMs,
-          firstReturnMs: opportunity.latency?.returnMs,
-          secondOutboundMs: revalidation.secondOutboundMs,
-          secondReturnMs: revalidation.secondReturnMs,
-        });
-      } catch (error) {
-        logger.warn('⚠️ Failed to record validation (non-blocking):', error);
+    let totalValidationDelayMs = 0;
+    if (validationEnabled && revalidation) {
+      const secondCheckedAt = new Date();
+      totalValidationDelayMs = secondCheckedAt.getTime() - opportunity.timestamp;
+
+      if (this.config.database?.enabled && opportunityId) {
+        try {
+          await databaseRecorder.recordOpportunityValidation({
+            opportunityId,
+            firstDetectedAt,
+            firstProfit,
+            firstRoi,
+            secondCheckedAt,
+            stillExists: revalidation.stillExists,
+            secondProfit: revalidation.stillExists ? BigInt(revalidation.secondProfit) : undefined,
+            secondRoi: revalidation.stillExists ? revalidation.secondRoi : undefined,
+            validationDelayMs: totalValidationDelayMs,  // 🔥 使用总延迟而不是查询延迟
+            // 🔥 新增：详细延迟分析数据
+            firstOutboundMs: opportunity.latency?.outboundMs,
+            firstReturnMs: opportunity.latency?.returnMs,
+            secondOutboundMs: revalidation.secondOutboundMs,
+            secondReturnMs: revalidation.secondReturnMs,
+          });
+        } catch (error) {
+          logger.warn('⚠️ Failed to record validation (non-blocking):', error);
+        }
       }
     }
 
     // 🔥 执行决策：基于构建结果，不看验证结果（验证仅用于统计）
     if (!buildResult) {
       logger.error('❌ Transaction build failed, skipping execution');
+      logger.info(`🔒 交易构建失败，确保不会执行交易，不会消耗 gas`);
       this.stats.opportunitiesFiltered++;
       
       if (this.config.database?.enabled && opportunityId) {
@@ -1265,14 +1335,19 @@ export class FlashloanBot {
           logger.warn('⚠️ Failed to mark filtered (non-blocking):', error);
         }
       }
+      // 🔒 安全保证：构建失败后立即返回，确保不会执行交易
       return;
     }
 
     // 📊 微信通知：推送验证统计结果（不影响执行）
-    logger.info(`✅ Transaction built successfully, validation stats: stillExists=${revalidation.stillExists}`);
+    if (validationEnabled && revalidation) {
+      logger.info(`✅ Transaction built successfully, validation stats: stillExists=${revalidation.stillExists}`);
+    } else {
+      logger.info('✅ Transaction built successfully (secondary validation skipped)');
+    }
     
     // 🆕 计算理论利润和费用（仅针对通过二次验证的机会）
-    if (revalidation.stillExists) {
+    if (validationEnabled && revalidation?.stillExists) {
       try {
         // 估算优先费用
         const { totalFee: estimatedPriorityFee, strategy: feeStrategy } = await this.priorityFeeEstimator.estimateOptimalFee(
@@ -1352,37 +1427,43 @@ export class FlashloanBot {
       } catch (error) {
         logger.warn('⚠️ 理论费用计算失败（不影响主流程）:', error);
       }
+    } else if (!validationEnabled) {
+      logger.info('ℹ️ Secondary validation disabled; skipping theoretical profit analysis.');
     }
     
-    if (this.monitoring && revalidation.stillExists) {
-      try {
-        const sent = await this.monitoring.alertOpportunityValidated({
-          inputMint: opportunity.inputMint.toBase58(),
-          bridgeToken: opportunity.bridgeToken,
-          route: opportunity.route,  // ✅ 传递路由信息（用于显示桥接次数）
-          // 第一次数据
-          firstProfit: opportunity.profit,
-          firstRoi: opportunity.roi,
-          firstOutboundMs: opportunity.latency?.outboundMs,
-          firstReturnMs: opportunity.latency?.returnMs,
-          // 第二次数据
-          secondProfit: revalidation.secondProfit,
-          secondRoi: revalidation.secondRoi,
-          secondOutboundMs: revalidation.secondOutboundMs,
-          secondReturnMs: revalidation.secondReturnMs,
-          // 验证延迟
-          validationDelayMs: totalValidationDelayMs,  // 🔥 使用总延迟
-        });
-        if (sent) {
-          logger.info('📱 ✅ 二次验证通过通知已成功发送到微信');
-        } else {
-          logger.warn('📱 ⚠️ 二次验证通知未发送，原因可能是：');
-          logger.warn(`   1. 配置未开启: alert_on_opportunity_validated=${this.config.monitoring?.alert_on_opportunity_validated}`);
-          logger.warn(`   2. 利润低于阈值: secondProfit=${(revalidation.secondProfit / LAMPORTS_PER_SOL).toFixed(6)} SOL < min=${(this.config.monitoring?.min_validated_profit_for_alert || 0) / LAMPORTS_PER_SOL} SOL`);
-          logger.warn(`   3. 频率限制: validated_alert_rate_limit_ms=${this.config.monitoring?.validated_alert_rate_limit_ms || 0}ms`);
+    if (this.monitoring) {
+      if (validationEnabled && revalidation?.stillExists) {
+        try {
+          const sent = await this.monitoring.alertOpportunityValidated({
+            inputMint: opportunity.inputMint.toBase58(),
+            bridgeToken: opportunity.bridgeToken,
+            route: opportunity.route,  // ✅ 传递路由信息（用于显示桥接次数）
+            // 第一次数据
+            firstProfit: opportunity.profit,
+            firstRoi: opportunity.roi,
+            firstOutboundMs: opportunity.latency?.outboundMs,
+            firstReturnMs: opportunity.latency?.returnMs,
+            // 第二次数据
+            secondProfit: revalidation.secondProfit,
+            secondRoi: revalidation.secondRoi,
+            secondOutboundMs: revalidation.secondOutboundMs,
+            secondReturnMs: revalidation.secondReturnMs,
+            // 验证延迟
+            validationDelayMs: totalValidationDelayMs,
+          });
+          if (sent) {
+            logger.info('📱 ✅ 二次验证通过通知已成功发送到微信');
+          } else {
+            logger.warn('📱 ⚠️ 二次验证通知未发送，原因可能是：');
+            logger.warn(`   1. 配置未开启: alert_on_opportunity_validated=${this.config.monitoring?.alert_on_opportunity_validated}`);
+            logger.warn(`   2. 利润低于阈值: secondProfit=${(revalidation.secondProfit / LAMPORTS_PER_SOL).toFixed(6)} SOL < min=${(this.config.monitoring?.min_validated_profit_for_alert || 0) / LAMPORTS_PER_SOL} SOL`);
+            logger.warn(`   3. 频率限制: validated_alert_rate_limit_ms=${this.config.monitoring?.validated_alert_rate_limit_ms || 0}ms`);
+          }
+        } catch (error) {
+          logger.error('📱 ❌ 发送微信通知失败:', error);
         }
-      } catch (error) {
-        logger.error('📱 ❌ 发送微信通知失败:', error);
+      } else if (!validationEnabled) {
+        logger.info('📱 Secondary validation disabled; skipping validated opportunity alert.');
       }
     } else {
       logger.warn('📱 ⚠️ 监控服务未启用，无法发送微信通知');
@@ -1409,6 +1490,17 @@ export class FlashloanBot {
     
     // 深度模拟模式：继续执行，但在executor中不发送bundle
 
+    // 🔒 额外的安全检查：即使 simulateToBundle 为 true，如果 dryRun 为 true，也不执行交易
+    if (this.config.dryRun) {
+      logger.info(
+        `[DRY RUN] Would execute flashloan arbitrage with ${borrowAmount / LAMPORTS_PER_SOL} SOL ` +
+        `(simulateToBundle enabled, but dryRun prevents execution)`
+      );
+      this.stats.tradesSuccessful++;
+      this.stats.totalProfitSol += validation.netProfit / LAMPORTS_PER_SOL;
+      return;
+    }
+
     // 检查熔断器
     if (!this.economics.circuitBreaker.canAttempt()) {
       logger.warn('🚨 Circuit breaker activated, skipping trade');
@@ -1416,7 +1508,14 @@ export class FlashloanBot {
     }
 
     try {
+      // 🔒 安全检查：确保交易对象存在且有效
+      if (!transaction) {
+        logger.error('❌ Transaction is null, cannot execute');
+        return;
+      }
+
       // 执行交易
+      logger.info(`💰 Executing transaction: sending to executor...`);
       this.stats.tradesAttempted++;
       const result = await this.executor.executeVersionedTransaction(
         transaction,
@@ -1656,22 +1755,44 @@ export class FlashloanBot {
         lookupTableAccounts  // 传递 ALT 以压缩交易大小
       );
 
-      // 计算交易大小
-      const txSize = transaction.message.serialize().length;
-      const maxTxSize = 1232;
+      // 3. 签名交易（模拟需要签名）
+      // ⚠️ 安全注意：此交易仅用于模拟，模拟后会立即失效（blockhash过期）
+      // 模拟用的交易是局部变量，不会被返回或重用，绝对安全
+      // 🔧 修复：先签名，再测量完整交易大小（包含签名）
+      transaction.sign([this.keypair]);
+
+      // 4. 计算交易大小（签名后的完整交易）
+      const txSize = transaction.serialize().length;
+      const maxTxSize = 1232; // 原始交易限制
+      const maxBase64Size = 1644; // Base64编码后的限制
+
+      // 计算Base64编码后的估算大小（增加33.3%）
+      const estimatedBase64Size = Math.ceil(txSize * 1.333);
+
       logger.info(
-        `📦 Transaction size: ${txSize}/${maxTxSize} bytes ` +
+        `📦 Transaction size: ${txSize}/${maxTxSize} bytes (raw), ` +
+        `~${estimatedBase64Size}/${maxBase64Size} bytes (base64 encoded) ` +
         `(${lookupTableAccounts.length} ALTs, ${arbitrageInstructions.length} instructions)`
       );
       
       if (txSize > maxTxSize) {
-        logger.error(`❌ Transaction too large: ${txSize} > ${maxTxSize} bytes`);
+        logger.error(`❌ Transaction too large: ${txSize} > ${maxTxSize} bytes (raw)`);
+        return {
+          valid: false,
+          reason: `Transaction too large: ${txSize} bytes (raw) > ${maxTxSize} bytes`,
+        };
       }
 
-      // 3. 签名交易（模拟需要签名）
-      transaction.sign([this.keypair]);
+      if (estimatedBase64Size > maxBase64Size) {
+        logger.error(`❌ Transaction too large after base64 encoding: ${estimatedBase64Size} > ${maxBase64Size} bytes`);
+        return {
+          valid: false,
+          reason: `Transaction too large after base64 encoding: ${estimatedBase64Size} bytes > ${maxBase64Size} bytes`,
+        };
+      }
 
-      // 4. RPC模拟执行（免费！）⭐
+      // 5. RPC模拟执行（免费！）⭐
+      // simulateTransaction 不会发送交易到链上，不会消耗任何 gas
       const simulation = await this.connection.simulateTransaction(
         transaction,
         {
@@ -1694,7 +1815,11 @@ export class FlashloanBot {
 
       const simTime = Date.now() - startTime;
 
-      // 5. 分析模拟结果
+      // 🔒 安全说明：模拟用的交易对象是局部变量，不会被返回或重用
+      // simulateTransaction 不会发送交易到链上，不会消耗任何 gas
+      // 交易对象在函数返回后会自动被垃圾回收，绝对安全
+
+      // 6. 分析模拟结果
       if (simulation.value.err) {
         // 模拟失败 - 这是我们要过滤的
         const errorMsg = this.parseSimulationError(simulation.value.err);
@@ -1702,7 +1827,8 @@ export class FlashloanBot {
         logger.warn(
           `❌ Simulation failed (${simTime}ms)\n` +
           `   Reason: ${errorMsg}\n` +
-          `   🎉 Saved 0.116 SOL (Gas + Tip) by filtering invalid opportunity`
+          `   🎉 Saved 0.116 SOL (Gas + Tip) by filtering invalid opportunity\n` +
+          `   ✅ 模拟交易已安全销毁，不会消耗任何 gas`
         );
 
         return {
@@ -1716,7 +1842,8 @@ export class FlashloanBot {
       logger.info(
         `✅ Simulation passed (${simTime}ms)\n` +
         `   Compute units: ${simulation.value.unitsConsumed || 'unknown'}\n` +
-        `   Log entries: ${simulation.value.logs?.length || 0}`
+        `   Log entries: ${simulation.value.logs?.length || 0}\n` +
+        `   ✅ 模拟交易已安全销毁，不会消耗任何 gas`
       );
 
       // 可选：分析日志，提取实际利润
@@ -1831,15 +1958,15 @@ export class FlashloanBot {
       // 2. 计算最优借款金额
       const borrowAmount = this.calculateOptimalBorrowAmount(opportunity);
       
-      // 3. 计算预期利润
+      // 3. 初步利润检查（基于Ultra报价，仅过滤明显无利润的情况）
       const profitRate = opportunity.profit / opportunity.inputAmount;
-      const expectedProfit = Math.floor(profitRate * borrowAmount);
+      const expectedProfitFromUltra = Math.floor(profitRate * borrowAmount);
       
       logger.debug(
-        `Profit calculation: query ${opportunity.inputAmount / LAMPORTS_PER_SOL} SOL -> ` +
+        `Profit calculation (Ultra quote): query ${opportunity.inputAmount / LAMPORTS_PER_SOL} SOL -> ` +
         `profit ${opportunity.profit / LAMPORTS_PER_SOL} SOL (${(profitRate * 100).toFixed(4)}%), ` +
         `borrow ${borrowAmount / LAMPORTS_PER_SOL} SOL -> ` +
-        `expected ${expectedProfit / LAMPORTS_PER_SOL} SOL`
+        `expected ${expectedProfitFromUltra / LAMPORTS_PER_SOL} SOL`
       );
       
       // 4. 过滤异常ROI
@@ -1852,15 +1979,188 @@ export class FlashloanBot {
         return null;
       }
       
-      // 5. 动态估算优先费
-      const { totalFee: priorityFee, strategy } = await this.priorityFeeEstimator.estimateOptimalFee(
-        expectedProfit,
+      // 5. 初步利润过滤（基于Ultra报价，仅过滤明显无利润的情况）
+      // 注意：这里只做初步过滤，真正的利润验证会在并行预判后基于实际路由报价进行
+      if (expectedProfitFromUltra <= 0) {
+        logger.debug(`❌ 初步检查：Ultra报价显示无利润，跳过`);
+        return null;
+      }
+      
+      // 6. 构建闪电贷指令（如果使用Jupiter Lend）
+      let flashLoanInstructions = null;
+      const isJupiterLend = this.config.flashloan.provider === 'jupiter-lend';
+      
+      if (isJupiterLend) {
+        logger.debug('🔧 Building Jupiter Lend flash loan instructions...');
+        try {
+          flashLoanInstructions = await this.jupiterLendAdapter.buildFlashLoanInstructions({
+            amount: borrowAmount,
+            asset: opportunity.inputMint,
+            signer: this.keypair.publicKey,
+          });
+          
+          // 🔒 延迟 ALT 扩展：先检查交易大小，避免无效扩展
+          // 如果交易大小超限，将跳过 ALT 扩展（在交易大小检查之后进行）
+          
+          logger.debug(
+            `✅ Jupiter Lend flash loan instructions built ` +
+            `(borrow: ${flashLoanInstructions.borrowInstruction.keys.length} accounts, ` +
+            `repay: ${flashLoanInstructions.repayInstruction.keys.length} accounts)`
+          );
+        } catch (error: any) {
+          logger.error(`❌ Failed to build Jupiter Lend instructions: ${error.message}`);
+          return null;
+        }
+      }
+      
+      // 8. 🚀 并行预判策略：并行获取多个策略的报价和指令
+      logger.debug('🚀 Building swap instructions via Quote API with parallel fallback...');
+      const buildStart = Date.now();
+      const maxBase64Size = 1644; // Base64编码后的限制
+      
+      // 定义降级策略（从宽松到严格）
+      const strategies = [
+        { name: '最优路由', maxAccounts: 28, onlyDirectRoutes: false },
+        { name: '中等限制', maxAccounts: 24, onlyDirectRoutes: false },
+        { name: '严格限制', maxAccounts: 20, onlyDirectRoutes: true },
+      ];
+      
+      // 并行获取所有策略的Swap1和Swap2指令
+      logger.debug(`🚀 并行预判：同时请求 ${strategies.length} 个策略的报价...`);
+      const parallelStart = Date.now();
+      
+      const swap1Promises = strategies.map(strategy =>
+        this.buildSwapInstructionsFromQuoteAPI({
+          inputMint: opportunity.inputMint,
+          outputMint: opportunity.bridgeMint!,
+          amount: borrowAmount,
+          slippageBps: 50,
+          ultraRoutePlan: opportunity.outboundQuote.routePlan,
+          maxAccounts: strategy.maxAccounts,
+          onlyDirectRoutes: strategy.onlyDirectRoutes,
+        }).then(result => ({ strategy, result }))
+      );
+      
+      const swap2Promises = strategies.map(strategy =>
+        this.buildSwapInstructionsFromQuoteAPI({
+          inputMint: opportunity.bridgeMint!,
+          outputMint: opportunity.outputMint,
+          amount: opportunity.bridgeAmount!,
+          slippageBps: 50,
+          ultraRoutePlan: opportunity.returnQuote.routePlan,
+          maxAccounts: strategy.maxAccounts,
+          onlyDirectRoutes: strategy.onlyDirectRoutes,
+        }).then(result => ({ strategy, result }))
+      );
+      
+      const [swap1Results, swap2Results] = await Promise.all([
+        Promise.all(swap1Promises),
+        Promise.all(swap2Promises),
+      ]);
+      
+      const parallelLatency = Date.now() - parallelStart;
+      logger.info(`✅ 并行预判完成 (${parallelLatency}ms): ${swap1Results.length} 个策略结果`);
+      
+      // 找到最佳策略组合：利润最高且符合大小限制
+      let bestSwap1: any = null;
+      let bestSwap2: any = null;
+      let bestStrategyCombination = '';
+      let bestEstimatedSize = Infinity;
+      let bestEstimatedProfit = -Infinity;  // 🆕 记录最佳利润
+      
+      for (let i = 0; i < strategies.length; i++) {
+        const swap1 = swap1Results[i];
+        const swap2 = swap2Results[i];
+        
+        if (!swap1.result || !swap2.result) {
+          continue; // 跳过失败的策略
+        }
+        
+        // 🆕 估算利润（基于实际路由报价）
+        const estimatedProfit = swap2.result.outAmount - borrowAmount;
+        
+        // 估算交易大小
+        const tempInstructions = [
+          ...swap1.result.computeBudgetInstructions,
+          ...swap1.result.setupInstructions,
+          ...swap1.result.instructions,
+          ...swap1.result.cleanupInstructions,
+          ...swap2.result.instructions,
+          ...swap2.result.cleanupInstructions,
+        ];
+        
+        const tempAltSet = new Set<string>();
+        swap1.result.addressLookupTableAddresses.forEach(addr => tempAltSet.add(addr));
+        swap2.result.addressLookupTableAddresses.forEach(addr => tempAltSet.add(addr));
+        
+        // 添加闪电贷ALT（估算）
+        if (isJupiterLend) {
+          const jupiterLendALT = this.jupiterLendALTManager.getALTAddress();
+          if (jupiterLendALT) {
+            tempAltSet.add(jupiterLendALT.toBase58());
+          }
+        }
+        
+        const tempAltAccounts = await this.loadAddressLookupTables(Array.from(tempAltSet));
+        const estimatedSize = this.estimateTransactionSize(tempInstructions, tempAltAccounts);
+        
+        // 🆕 选择策略：优先选择利润高且符合大小限制的策略
+        // 如果利润相同，选择交易大小更小的策略
+        const fitsSizeLimit = estimatedSize <= maxBase64Size;
+        const isBetterProfit = estimatedProfit > bestEstimatedProfit;
+        const isSameProfitButSmaller = estimatedProfit === bestEstimatedProfit && estimatedSize < bestEstimatedSize;
+        
+        if (fitsSizeLimit && (isBetterProfit || isSameProfitButSmaller)) {
+          bestSwap1 = swap1.result;
+          bestSwap2 = swap2.result;
+          bestStrategyCombination = `${swap1.strategy.name}+${swap2.strategy.name}`;
+          bestEstimatedSize = estimatedSize;
+          bestEstimatedProfit = estimatedProfit;
+        }
+      }
+      
+      if (!bestSwap1 || !bestSwap2) {
+        logger.warn(
+          `⚠️ 所有策略都失败或超限，无法构建交易。` +
+          `尝试了 ${strategies.length} 个策略组合。`
+        );
+        this.stats.opportunitiesFiltered++;
+        return null;
+      }
+      
+      logger.info(
+        `✅ 选择最佳策略: ${bestStrategyCombination}, ` +
+        `估算大小: ${bestEstimatedSize} bytes, ` +
+        `估算利润: ${(bestEstimatedProfit / LAMPORTS_PER_SOL).toFixed(6)} SOL`
+      );
+      
+      // 使用最佳策略组合
+      const swap1Result = bestSwap1;
+      const swap2Result = bestSwap2;
+      
+      logger.debug(`✅ Built instructions: swap1=${swap1Result.instructions.length} ix, swap2=${swap2Result.instructions.length} ix`);
+      
+      // 🆕 3. 重新验证利润（基于实际路由报价）
+      // 这里使用实际路由的报价，而不是Ultra报价
+      const actualOutAmount = swap2Result.outAmount;  // Swap2的输出金额（最终得到的代币数量）
+      const actualGrossProfit = actualOutAmount - borrowAmount;  // 毛利润
+      
+      logger.info(
+        `💰 利润重新计算（基于实际路由报价）: ` +
+        `借入=${(borrowAmount / LAMPORTS_PER_SOL).toFixed(6)} SOL, ` +
+        `实际输出=${(actualOutAmount / LAMPORTS_PER_SOL).toFixed(6)} SOL, ` +
+        `毛利润=${(actualGrossProfit / LAMPORTS_PER_SOL).toFixed(6)} SOL`
+      );
+      
+      // 动态估算优先费（基于实际利润）
+      const { totalFee: priorityFee, strategy: priorityFeeStrategy } = await this.priorityFeeEstimator.estimateOptimalFee(
+        actualGrossProfit,
         'high'
       );
       
-      logger.info(`💡 优先费策略: ${strategy}, 费用: ${(priorityFee / LAMPORTS_PER_SOL).toFixed(6)} SOL`);
+      logger.info(`💡 优先费策略: ${priorityFeeStrategy}, 费用: ${(priorityFee / LAMPORTS_PER_SOL).toFixed(6)} SOL`);
       
-      // 6. 验证闪电贷可行性
+      // 验证闪电贷可行性（基于实际利润）
       const feeConfig = {
         baseFee: this.config.economics.cost.signatureCount * 5000,
         priorityFee,
@@ -1869,11 +2169,11 @@ export class FlashloanBot {
       };
       
       const validation = this.config.flashloan.provider === 'jupiter-lend'
-        ? JupiterLendAdapter.validateFlashLoan(borrowAmount, expectedProfit, feeConfig)
-        : SolendAdapter.validateFlashLoan(borrowAmount, expectedProfit, feeConfig);
+        ? JupiterLendAdapter.validateFlashLoan(borrowAmount, actualGrossProfit, feeConfig)
+        : SolendAdapter.validateFlashLoan(borrowAmount, actualGrossProfit, feeConfig);
       
       if (!validation.valid) {
-        logger.debug(`❌ 机会被拒绝: ${validation.reason || 'unknown'}`);
+        logger.warn(`❌ 重新验证失败（策略 ${bestStrategyCombination}）: ${validation.reason || 'unknown'}`);
         if (validation.breakdown) {
           logger.debug(
             `   费用拆解: ` +
@@ -1881,47 +2181,16 @@ export class FlashloanBot {
             `净利润=${(validation.breakdown.netProfit / LAMPORTS_PER_SOL).toFixed(6)} SOL`
           );
         }
+        this.stats.opportunitiesFiltered++;
         return null;
       }
       
       const flashLoanFee = validation.fee;
       logger.info(
-        `✅ 可执行机会 - 净利润: ${(validation.netProfit / LAMPORTS_PER_SOL).toFixed(6)} SOL`
+        `✅ 重新验证通过（策略 ${bestStrategyCombination}） - 净利润: ${(validation.netProfit / LAMPORTS_PER_SOL).toFixed(6)} SOL`
       );
       
-      // 7. 使用 Quote API 构建指令（支持闪电贷，不检查余额）
-      logger.debug('🚀 Building swap instructions via Quote API (flash loan compatible)...');
-      const buildStart = Date.now();
-      
-      // 7.1 并行调用 Quote API 获取两个 swap 的指令
-      const [swap1Result, swap2Result] = await Promise.all([
-        // 去程：SOL → Bridge Token
-        this.buildSwapInstructionsFromQuoteAPI({
-          inputMint: opportunity.inputMint,
-          outputMint: opportunity.bridgeMint!,
-          amount: borrowAmount,
-          slippageBps: 50,
-          ultraRoutePlan: opportunity.outboundQuote.routePlan,  // 使用Ultra的路由引导
-        }),
-        
-        // 回程：Bridge Token → SOL  
-        this.buildSwapInstructionsFromQuoteAPI({
-          inputMint: opportunity.bridgeMint!,
-        outputMint: opportunity.outputMint,
-          amount: opportunity.bridgeAmount!,
-          slippageBps: 50,
-          ultraRoutePlan: opportunity.returnQuote.routePlan,  // 使用Ultra的路由引导
-        }),
-      ]);
-      
-      if (!swap1Result || !swap2Result) {
-        logger.error('❌ Failed to build swap instructions from Quote API');
-        return null;
-      }
-      
-      logger.debug(`✅ Built instructions: swap1=${swap1Result.instructions.length} ix, swap2=${swap2Result.instructions.length} ix`);
-      
-      // 7.2 合并所有指令（计算预算 + Setup + Swap + Cleanup）
+      // 8.3 合并所有指令（计算预算 + Setup + Swap + Cleanup）
       const arbitrageInstructions = [
         ...swap1Result.computeBudgetInstructions,  // Swap1的计算预算
         ...swap1Result.setupInstructions,          // Swap1的账户设置
@@ -1931,10 +2200,28 @@ export class FlashloanBot {
         ...swap2Result.cleanupInstructions,        // Swap2清理
       ];
       
-      // 7.3 合并 ALT（去重）
+      // 8.4 合并 ALT（去重）
       const altSet = new Set<string>();
       swap1Result.addressLookupTableAddresses.forEach(addr => altSet.add(addr));
       swap2Result.addressLookupTableAddresses.forEach(addr => altSet.add(addr));
+      
+      // 🗜️ 添加闪电贷ALT（根据配置选择）
+      let flashLoanALTAdded = false;
+      if (isJupiterLend) {
+        const jupiterLendALT = this.jupiterLendALTManager.getALTAddress();
+        if (jupiterLendALT) {
+          altSet.add(jupiterLendALT.toBase58());
+          flashLoanALTAdded = true;
+          logger.debug(`🗜️ Added Jupiter Lend ALT: ${jupiterLendALT.toBase58().slice(0, 8)}...`);
+        }
+      } else {
+        const solendALT = this.solendALTManager.getALTAddress();
+        if (solendALT) {
+          altSet.add(solendALT.toBase58());
+          flashLoanALTAdded = true;
+          logger.debug(`🗜️ Added Solend ALT: ${solendALT.toBase58().slice(0, 8)}...`);
+        }
+      }
       
       const lookupTableAccounts = await this.loadAddressLookupTables(
         Array.from(altSet)
@@ -1943,7 +2230,49 @@ export class FlashloanBot {
       const buildLatency = Date.now() - buildStart;
       logger.info(
         `✅ Built ${arbitrageInstructions.length} instructions ` +
-        `with ${lookupTableAccounts.length} ALTs in ${buildLatency}ms (quote_age=${quoteAge}ms)`
+        `with ${lookupTableAccounts.length} ALTs in ${buildLatency}ms (quote_age=${quoteAge}ms)` +
+        `${flashLoanALTAdded ? ` [incl. ${isJupiterLend ? 'Jupiter Lend' : 'Solend'} ALT]` : ''} ` +
+        `[strategy=${bestStrategyCombination}, size=${bestEstimatedSize} bytes]`
+      );
+      
+      // 🚨 再次验证交易大小（使用实际的ALT）
+      const finalEstimatedSize = this.estimateTransactionSize(
+        arbitrageInstructions,
+        lookupTableAccounts
+      );
+      
+      if (finalEstimatedSize > maxBase64Size) {
+        logger.warn(
+          `⚠️ Final transaction size estimated ${finalEstimatedSize} bytes (base64 encoded) > ${maxBase64Size} limit. ` +
+          `Rejecting before simulation to save RPC calls.`
+        );
+        this.stats.opportunitiesFiltered++;
+        return null;
+      }
+
+      // 🔒 安全时机：交易大小检查通过后，再扩展 ALT
+      // 这样可以避免在交易被拒绝时仍然执行 ALT 扩展
+      if (isJupiterLend && flashLoanInstructions) {
+        logger.debug('🔧 Ensuring ALT contains flash loan addresses (after size check)...');
+        try {
+          await this.jupiterLendALTManager.ensureALTForInstructions(
+            flashLoanInstructions.borrowInstruction,
+            flashLoanInstructions.repayInstruction
+          );
+        } catch (error: any) {
+          logger.error(`❌ Failed to ensure ALT: ${error.message}`);
+          // ALT 扩展失败不应该阻止交易执行（如果 ALT 已存在）
+          // 但如果是首次创建 ALT 失败，应该拒绝交易
+          if (!this.jupiterLendALTManager.getALTAddress()) {
+            logger.error(`❌ ALT does not exist and creation failed, rejecting transaction`);
+            return null;
+          }
+        }
+      }
+
+      logger.debug(
+        `✅ Transaction size OK: ${finalEstimatedSize}/${maxBase64Size} bytes (base64 encoded) ` +
+        `(${arbitrageInstructions.length} ix, ${lookupTableAccounts.length} ALTs)`
       );
       
       // 11. RPC模拟验证
@@ -1957,6 +2286,7 @@ export class FlashloanBot {
       
       if (!simulation.valid) {
         logger.warn(`❌ RPC simulation failed: ${simulation.reason}`);
+        logger.info(`🔒 模拟失败后交易构建终止，确保不会发送交易，不会消耗 gas`);
         this.stats.opportunitiesFiltered++;
         
         if (this.config.database?.enabled && opportunityId) {
@@ -1970,6 +2300,7 @@ export class FlashloanBot {
           }
         }
         
+        // 🔒 安全保证：模拟失败后立即返回 null，确保不会构建或发送交易
         return null;
       }
       
@@ -1985,12 +2316,13 @@ export class FlashloanBot {
         {
           useFlashLoan: true,
           flashLoanConfig: {
-            protocol: this.config.flashloan.provider === 'jupiter-lend'
+            protocol: isJupiterLend
               ? FlashLoanProtocol.JUPITER_LEND
               : FlashLoanProtocol.SOLEND,
             amount: Number(borrowAmount),
             tokenMint: opportunity.inputMint,
           },
+          flashLoanInstructions: flashLoanInstructions || undefined, // 传入Jupiter Lend指令（如果有）
           arbitrageInstructions,
           wallet: this.keypair.publicKey,
         },
@@ -2033,13 +2365,20 @@ export class FlashloanBot {
     amount: number;
     slippageBps: number;
     ultraRoutePlan?: any[];
+    maxAccounts?: number;  // 🆕 策略参数：账户数限制
+    onlyDirectRoutes?: boolean;  // 🆕 策略参数：是否强制直接路由
   }): Promise<{
     instructions: TransactionInstruction[];
     setupInstructions: TransactionInstruction[];
     cleanupInstructions: TransactionInstruction[];
     computeBudgetInstructions: TransactionInstruction[];
     addressLookupTableAddresses: string[];
+    outAmount: number;  // 🆕 报价输出金额（用于重新验证利润）
   } | null> {
+    const maxRetries = 3;
+    const retryDelay = 100; // ms
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       // 1. 从 Ultra routePlan 提取 DEX 列表（如果有）
       const dexes = params.ultraRoutePlan
@@ -2047,48 +2386,114 @@ export class FlashloanBot {
         .filter(Boolean);
       
       logger.debug(
-        `Building swap via Quote API: ${params.inputMint.toBase58().slice(0,8)}... → ` +
+          `Building swap via Legacy Swap API (attempt ${attempt}/${maxRetries}): ` +
+          `${params.inputMint.toBase58().slice(0,8)}... → ` +
         `${params.outputMint.toBase58().slice(0,8)}..., ` +
         `amount=${params.amount}, dexes=${dexes?.join(',') || 'auto'}`
       );
       
-      // 2. 调用 Quote API /quote
+        // 2. 调用 Legacy Swap API /quote
       const quoteParams: any = {
         inputMint: params.inputMint.toBase58(),
         outputMint: params.outputMint.toBase58(),
         amount: params.amount.toString(),
         slippageBps: params.slippageBps,
-        onlyDirectRoutes: true,
-        maxAccounts: 20,
+        onlyDirectRoutes: params.onlyDirectRoutes !== undefined ? params.onlyDirectRoutes : false, // 🆕 使用策略参数
+        maxAccounts: params.maxAccounts !== undefined ? params.maxAccounts : 20, // 🆕 使用策略参数
       };
       
-      // 如果有 Ultra 的路由信息，尝试锁定 DEX
+        // 如果有 Ultra 的路由信息，尝试锁定 DEX（引导路由）
       if (dexes && dexes.length > 0) {
         quoteParams.dexes = dexes.join(',');
       }
       
       const quoteResponse = await this.jupiterQuoteAxios.get('/quote', {
         params: quoteParams,
-        timeout: 3000,
+          timeout: 30000,
       });
       
       if (!quoteResponse.data || !quoteResponse.data.outAmount) {
-        logger.warn('Quote API returned no route');
+          logger.warn(`Legacy Swap API returned no route (attempt ${attempt}/${maxRetries})`);
+          
+          // 如果是因为指定了 dexes 导致无路由，下次重试时不指定
+          if (attempt < maxRetries && dexes && dexes.length > 0) {
+            logger.info('Retrying without dexes constraint...');
+            params.ultraRoutePlan = undefined; // 清除 DEX 限制
+            await new Promise(resolve => setTimeout(resolve, retryDelay * attempt));
+            continue;
+          }
+          
         return null;
       }
       
-      // 3. 调用 /swap-instructions（不检查余额）
+        // 📊 添加详细的路由调试日志
+        logger.debug(
+          `Quote API response: ` +
+          `outAmount=${quoteResponse.data.outAmount}, ` +
+          `marketInfos=${quoteResponse.data.marketInfos?.length || 0}, ` +
+          `routePlan=${quoteResponse.data.routePlan?.length || 0}`
+        );
+        
+        // 输出市场详情（用于调试）
+        if (quoteResponse.data.marketInfos && quoteResponse.data.marketInfos.length > 0) {
+          const marketLabels = quoteResponse.data.marketInfos.map((m: any) => m.label || 'Unknown');
+          logger.debug(`Markets in route: ${marketLabels.join(' → ')}`);
+        }
+        
+        // 🚨 关键优化：检查路由复杂度，过滤掉会导致交易过大的路由
+        // 修复：检查实际的DEX数量，而不只是swap数量
+        const routeComplexity = this.analyzeRouteComplexity(quoteResponse.data);
+        
+        // 闪电贷场景：最多允许2个DEX（更严格的限制）
+        // 🚀 Jupiter Lend (0% fee) + ALT压缩后，可以支持3个DEX！
+        const maxDexes = this.config.flashloan.provider === 'jupiter-lend' ? 3 : 2;
+        const maxAccounts = 28;  // Jupiter Lend允许更多账户
+        
+        if (routeComplexity.totalDexes > maxDexes) {
+          logger.warn(
+            `⚠️ Route has too many DEXes: ${routeComplexity.totalDexes} > ${maxDexes} max (${this.config.flashloan.provider}). ` +
+            `DEX list: ${routeComplexity.dexLabels.join(' → ')}. ` +
+            `This would create oversized transaction. Skipping.`
+          );
+          return null;
+        }
+        
+        if (routeComplexity.totalAccounts > maxAccounts) {
+          logger.warn(
+            `⚠️ Route requires too many accounts: ${routeComplexity.totalAccounts} > ${maxAccounts} max. ` +
+            `Skipping to avoid transaction size issues.`
+          );
+          return null;
+        }
+        
+        logger.debug(
+          `✅ Route complexity check passed: ${routeComplexity.totalDexes} DEXes ` +
+          `(${routeComplexity.dexLabels.join(' → ')}), ` +
+          `${routeComplexity.totalAccounts} accounts <= ${maxAccounts} max`
+        );
+        
+        // 3. 调用 /swap-instructions（不检查余额，支持闪电贷）
       const swapInstructionsResponse = await this.jupiterQuoteAxios.post('/swap-instructions', {
         quoteResponse: quoteResponse.data,
         userPublicKey: this.keypair.publicKey.toBase58(),
         wrapAndUnwrapSol: true,
         dynamicComputeUnitLimit: true,
+          // prioritizationFeeLamports: 'auto', // 让 Jupiter 自动设置优先费
       }, {
-        timeout: 3000,
+          timeout: 30000,
       });
       
       if (swapInstructionsResponse.data?.error) {
-        logger.error(`Quote API error: ${swapInstructionsResponse.data.error}`);
+          logger.error(
+            `Legacy Swap API error (attempt ${attempt}/${maxRetries}): ` +
+            `${swapInstructionsResponse.data.error}`
+          );
+          
+          if (attempt < maxRetries) {
+            await new Promise(resolve => setTimeout(resolve, retryDelay * attempt));
+            continue;
+          }
+          
         return null;
       }
       
@@ -2113,7 +2518,8 @@ export class FlashloanBot {
         });
       };
       
-      return {
+        // 反序列化所有指令
+        const deserializedInstructions = {
         instructions: swapInstructionPayload ? [deserializeInstruction(swapInstructionPayload)] : [],
         setupInstructions: (setupInstructions || []).map(deserializeInstruction),
         cleanupInstructions: cleanupInstruction ? [deserializeInstruction(cleanupInstruction)] : [],
@@ -2121,10 +2527,69 @@ export class FlashloanBot {
         addressLookupTableAddresses: addressLookupTableAddresses || [],
       };
       
+        // 📊 详细的指令统计日志
+        const totalInstructions = 
+          deserializedInstructions.instructions.length +
+          deserializedInstructions.setupInstructions.length +
+          deserializedInstructions.cleanupInstructions.length +
+          deserializedInstructions.computeBudgetInstructions.length;
+        
+        // 计算指令data总大小
+        const allInstructions = [
+          ...deserializedInstructions.computeBudgetInstructions,
+          ...deserializedInstructions.setupInstructions,
+          ...deserializedInstructions.instructions,
+          ...deserializedInstructions.cleanupInstructions,
+        ];
+        const totalDataSize = allInstructions.reduce((sum, ix) => sum + ix.data.length, 0);
+        const totalAccounts = allInstructions.reduce((sum, ix) => sum + ix.keys.length, 0);
+        
+        logger.debug(
+          `✅ Swap instructions built: ` +
+          `${totalInstructions} total (` +
+          `compute=${deserializedInstructions.computeBudgetInstructions.length}, ` +
+          `setup=${deserializedInstructions.setupInstructions.length}, ` +
+          `swap=${deserializedInstructions.instructions.length}, ` +
+          `cleanup=${deserializedInstructions.cleanupInstructions.length}), ` +
+          `data=${totalDataSize}B, accounts=${totalAccounts}, ALTs=${addressLookupTableAddresses?.length || 0}, ` +
+          `outAmount=${quoteResponse.data.outAmount}`
+        );
+        
+        return {
+          ...deserializedInstructions,
+          outAmount: Number(quoteResponse.data.outAmount),  // 🆕 返回报价输出金额
+        };
+        
     } catch (error: any) {
-      logger.error(`Failed to build swap instructions from Quote API: ${error.message}`);
+        const isTlsError = error.message?.includes('TLS') || 
+                          error.message?.includes('socket') ||
+                          error.code === 'ECONNRESET';
+        
+        logger.error(
+          `Failed to build swap instructions (attempt ${attempt}/${maxRetries}): ${error.message}` +
+          (isTlsError ? ' [TLS/网络错误]' : '')
+        );
+        
+        if (error.code) {
+          logger.error(`Error code: ${error.code}`);
+        }
+        
+        // 如果是网络错误且还有重试机会，则重试
+        if (isTlsError && attempt < maxRetries) {
+          const delay = retryDelay * attempt * 2; // 递增延迟
+          logger.info(`Retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
+        // 最后一次尝试失败，返回 null
+        if (attempt === maxRetries) {
       return null;
+        }
     }
+    }
+    
+    return null;
   }
 
   /**
@@ -2176,7 +2641,7 @@ export class FlashloanBot {
           wrapAndUnwrapSol: true,
           dynamicComputeUnitLimit: true,
         }, {
-          timeout: 3000,
+          timeout: 20000,
         });
 
         if (swapInstructionsResponse.data?.error) {
@@ -2426,6 +2891,150 @@ export class FlashloanBot {
   }
 
   /**
+   * 分析路由复杂度
+   * 
+   * 检查Quote API返回的路由信息，提取实际的DEX数量和账户数
+   * 
+   * @param quoteData Jupiter Quote API返回的数据
+   * @returns 路由复杂度信息
+   */
+  private analyzeRouteComplexity(quoteData: any): {
+    totalDexes: number;
+    totalAccounts: number;
+    dexLabels: string[];
+    routeType: 'direct' | 'split' | 'multi-hop';
+  } {
+    const dexLabels: string[] = [];
+    let totalAccounts = 0;
+    
+    // 1. 优先检查 marketInfos（最准确的DEX信息）
+    if (quoteData.marketInfos && Array.isArray(quoteData.marketInfos)) {
+      for (const marketInfo of quoteData.marketInfos) {
+        if (marketInfo.label) {
+          dexLabels.push(marketInfo.label);
+        }
+        // 累计账户数（每个market通常需要3-5个账户）
+        totalAccounts += 4;  // 平均估算
+      }
+    }
+    
+    // 2. 检查 routePlan（了解路由结构）
+    if (quoteData.routePlan && Array.isArray(quoteData.routePlan)) {
+      for (const plan of quoteData.routePlan) {
+        // 如果marketInfos没有数据，从routePlan提取
+        if (dexLabels.length === 0 && plan.swapInfo) {
+          if (plan.swapInfo.label) {
+            dexLabels.push(plan.swapInfo.label);
+          }
+          totalAccounts += 4;
+        }
+      }
+    }
+    
+    // 3. 确定路由类型
+    let routeType: 'direct' | 'split' | 'multi-hop' = 'direct';
+    if (quoteData.routePlan && quoteData.routePlan.length > 1) {
+      routeType = 'split';  // 分割路由（如50% Raydium + 50% Orca）
+    } else if (dexLabels.length > 1) {
+      routeType = 'multi-hop';  // 多跳路由（如Raydium → Orca → Whirlpool）
+    }
+    
+    // 4. 添加基础账户（签名者、token accounts等）
+    totalAccounts += 8;  // 基础开销
+    
+    // 5. 如果有contextSlot等元数据，可能需要额外账户
+    if (quoteData.contextSlot) {
+      totalAccounts += 2;
+    }
+    
+    logger.debug(
+      `Route analysis: ${dexLabels.length} DEXes detected, ` +
+      `${totalAccounts} accounts estimated, type=${routeType}`
+    );
+    
+    return {
+      totalDexes: dexLabels.length,
+      totalAccounts,
+      dexLabels,
+      routeType,
+    };
+  }
+
+  /**
+   * 估算交易大小（字节）
+   * 
+   * 交易大小组成：
+   * - 固定头部：~100 bytes
+   * - 签名数组：64 bytes (签名) + 4 bytes (数组长度)
+   * - ComputeBudget 指令：~30 bytes (2个指令)
+   * - 闪电贷指令：~150 bytes (borrow + repay，账户在ALT中)
+   * - Swap指令：取决于账户数和data大小
+   * - ALT引用：每个ALT约 ~35 bytes
+   * - 版本化交易额外开销：~50 bytes
+   * - 安全边际：5%
+   * - Base64编码：增加33.3%
+   * 
+   * @returns 估算的交易大小（Base64编码后的字节数）
+   */
+  private estimateTransactionSize(
+    arbitrageInstructions: TransactionInstruction[],
+    lookupTableAccounts: AddressLookupTableAccount[]
+  ): number {
+    let size = 0;
+    
+    // 1. 固定头部（版本号、签名计数等）
+    size += 100;
+    
+    // 2. 签名数组开销
+    size += 64; // 签名（64字节）
+    size += 4;  // 签名数组长度（compact-u16编码，1-4字节，保守估计4字节）
+    
+    // 3. ComputeBudget 指令（setComputeUnitLimit + setComputeUnitPrice）
+    size += 2 * 15; // 每个约15字节
+    
+    // 4. 闪电贷指令（borrow + repay）
+    // 假设所有账户都在ALT中（1字节索引）
+    size += 2 * 15; // 2个指令的基础开销
+    size += 14 * 1; // 账户索引（假设14个账户都在ALT中）
+    size += 100; // 指令data（borrow + repay）
+    
+    // 5. 套利指令（Swap指令）
+    for (const ix of arbitrageInstructions) {
+      // 每个指令的基础开销
+      size += 1; // programId索引
+      
+      // 账户数（降低压缩率到85%，更保守的估算）
+      const accountCount = ix.keys.length;
+      const compressedAccounts = Math.floor(accountCount * 0.85);
+      const uncompressedAccounts = accountCount - compressedAccounts;
+      size += compressedAccounts * 1; // ALT索引（1字节）
+      size += uncompressedAccounts * 32; // 完整地址（32字节）
+      
+      // 账户读写标记（每个账户1字节）
+      size += accountCount * 1;
+      
+      // 账户索引数组开销（每个账户约0.5字节）
+      size += Math.ceil(accountCount * 0.5);
+      
+      // 指令data（这是无法压缩的部分！）
+      size += ix.data.length;
+    }
+    
+    // 6. ALT引用（每个ALT约35字节）
+    size += lookupTableAccounts.length * 35;
+    
+    // 7. 版本化交易额外开销（约50字节）
+    size += 50;
+    
+    // 8. 安全边际（5%）
+    size = Math.ceil(size * 1.05);
+    
+    // 9. 返回Base64编码后的估算大小（RPC检查的是Base64编码后的限制）
+    // Base64编码增加33.3%：size * 1.333
+    return Math.ceil(size * 1.333);
+  }
+
+  /**
    * 获取或创建代币账户
    */
   private async getOrCreateTokenAccount(mint: PublicKey): Promise<PublicKey> {
@@ -2641,4 +3250,5 @@ if (require.main === module) {
 
 // 导出类和类型
 export * from './opportunity-finder';
+export { main };
 

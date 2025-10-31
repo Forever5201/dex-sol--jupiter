@@ -1,0 +1,75 @@
+================================================================================
+池子分析报告: Stabble USD1/USDC #2
+================================================================================
+
+地址: BqLJmoxkcetgwwybit9XksNTuPzeh7SpxkYExbZKmLEC
+Program ID: swapNyd8XiQwJ6ianp9snpu4brUqFxadzvHebnAXjJZ
+数据长度: 438 bytes
+Discriminator: 0xf19a6d0411b16dbc
+
+================================================================================
+Pubkey字段 (前20个)
+================================================================================
+[0] Offset 0: HG7q9f1k61ZACxPWhXU5ZsXehjSvAZDKn3vya4FWfAir
+[1] Offset 1: BPpCag7bn5ESJbeR8BjiTpyiZLJme2P6HfMKUM8w1MPC
+[2] Offset 2: 8LZ3CAN7gQkLqDZ9jNCMcmp7EALFh3dn4RnTA2FB2H6q
+[3] Offset 3: GtHAMG6QfvmeRZ1ERmgojVdrMqcYwdaQqe1161aMEvw
+[4] Offset 4: 2C4rHGcUJdNyu38MMdXWVgBZrzzd1JA6HUVhwRq8Gg4n
+[5] Offset 5: CwcDNVnKJmV4yz8kCEe9HC1BSaPReBviVVVAbwA3QEYW
+[6] Offset 6: 8PN12QxctzNZZaaiP9X5DVpmex5ZHPbQ9iUpqzKk9BUc
+[7] Offset 7: DgAi8mZ3w5nxdET7zUPJ5ARFGGyG938skXqjQcBkpR4z
+[8] Offset 8: 6iJsyM9ATHE3gs5Kxt2d15DuSeM4RJVEDYm3P8C7CAMB
+[9] Offset 9: G3Jr1dtLJeeK36KcZVF156afCMUwghfPkuGCMN9rtFNC
+[10] Offset 10: 8z8g7twRrdFF36XojXDCwQhHPGqJ74iMvKMawwt22zeC
+[11] Offset 11: C5VvsAXvMQrGwgZysdviKY9mpcEMrqEBG1JTxXnzs28b
+[12] Offset 12: BCjy1iC6tXZLp89XFCxm6JBJ9WS4mjamuyeewqzX5n9n
+[13] Offset 13: B9pGBhVQYkQQs6NRQJJrAVKvpLTqxXQxoMAP79Pt7TaX
+[14] Offset 14: FU6RmPcx3Vj4YL63m59XrvEJSpxcL2B72MKo1swU3S3U
+[15] Offset 15: HTAzi2oa7grBDbhnukfmvi4PWzjmXeVMTopWgi27DhHW
+[16] Offset 16: 8VqGzV8noN8bS3yiQvpxrNF8RLkgVgvFKDxgFHhB2PnA
+[17] Offset 17: 7mvSdcwZX2fgFzQRQ6zcRGKrhNNSw6BgkYs8XRv3pp1U
+[18] Offset 18: CKD4zkeY9dyS884vFuXgka2CBwK9F56zrYshErSiPEUP
+[19] Offset 19: 2o4NX8PhkGCncLjtdNceofWmHky5x9cUT8VyYUkiNSZu
+
+================================================================================
+u64数值字段 (前20个)
+================================================================================
+[0] Offset 104: 34360262656509 (0x1f401f4001fd)
+[1] Offset 168: 4294984515282 (0x3e80106bed2)
+[2] Offset 272: 1000 (0x3e8)
+[3] Offset 280: 5380949209000 (0x4e4d990efa8)
+[4] Offset 320: 65536262 (0x3e80106)
+[5] Offset 368: 4294984492162 (0x3e801066482)
+[6] Offset 392: 10728836 (0xa3b584)
+
+================================================================================
+Hex Dump (前512字节)
+================================================================================
+00000000  f1 9a 6d 04 11 b1 6d bc  54 df 76 a4 97 96 d6 f4  |..m...m.T.v.....|
+00000010  6f 64 a8 1a a8 37 3c f1  fd 46 b7 4c ac 20 82 7f  |od...7<..F.L. ..|
+00000020  17 da 7c 1f cf 19 cf 8e  0d 09 5c 71 20 53 fd 1b  |..|.......\q S..|
+00000030  4f 68 f0 37 81 7f 81 3b  9f 08 f9 5c 39 f1 82 08  |Oh.7...;...\9...|
+00000040  30 66 bf 80 d2 f7 ca 8b  e9 54 11 75 56 9b 10 5c  |0f.......T.uV..\|
+00000050  d4 39 81 d3 0a 5f 3b 58  66 81 e0 89 f0 e4 ec af  |.9..._;Xf.......|
+00000060  39 93 cb 4c f1 3a df a9  fd 01 40 1f 40 1f 00 00  |9..L.:....@.@...|
+00000070  00 00 00 00 00 00 00 00  00 00 00 00 00 00 14 82  |................|
+00000080  00 00 00 00 00 00 05 00  00 00 1c 2e e6 7f 12 4d  |...............M|
+00000090  f6 ed f2 a9 d2 bf 5e 3a  53 3c 77 01 b5 8f 8d aa  |......^:S<w.....|
+000000a0  95 72 10 a1 e5 b0 61 8c  d2 be 06 01 e8 03 00 00  |.r....a.........|
+000000b0  00 00 00 00 78 ca 7f 68  03 13 00 00 17 92 48 3b  |....x..h......H;|
+000000c0  6c 8a 2a 87 b7 47 1d 81  4f 95 91 f9 39 5c 84 0a  |l.*..G..O...9\..|
+000000d0  9c e3 d9 f4 d5 ba 7d 3a  4b 8a 74 9e 06 01 e8 03  |......}:K.t.....|
+000000e0  00 00 00 00 00 00 20 06  2a 72 0c 13 00 00 07 07  |...... .*r......|
+000000f0  2f 05 4a b4 8d 98 7d a4  e5 96 9e 63 2c dd f3 8d  |/.J...}....c,...|
+00000100  d6 41 41 34 9d a4 1b 0b  69 5b 91 d1 5c 3a 06 01  |.AA4....i[..\:..|
+00000110  e8 03 00 00 00 00 00 00  a8 ef 90 d9 e4 04 00 00  |................|
+00000120  c6 fa 7a f3 be db ad 3a  3d 65 f3 6a ab c9 74 31  |..z....:=e.j..t1|
+00000130  b1 bb e4 c2 d2 f6 e0 e4  7c a6 02 03 45 2f 5d 61  |........|...E/]a|
+00000140  06 01 e8 03 00 00 00 00  00 00 50 bc 9a dc 65 20  |..........P...e |
+00000150  00 00 ce 01 0e 60 af ed  b2 27 17 bd 63 19 2f 54  |.....`...'..c./T|
+00000160  14 5a 3f 96 5a 33 bb 82  d2 c7 02 9e b2 ce 1e 20  |.Z?.Z3......... |
+00000170  82 64 06 01 e8 03 00 00  00 00 00 00 88 15 32 af  |.d............2.|
+00000180  1a 11 00 00 00 00 40 0f  84 b5 a3 00 00 00 00 00  |......@.........|
+00000190  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+000001a0  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+000001b0  00 00 00 00 00 00                                 |......|

@@ -19,9 +19,14 @@ export interface JupiterApiConfig {
   timeout: number;
 }
 
+const shouldUseLocalApi = (value?: string | null): boolean => {
+  if (!value) return false;
+  return ['true', '1', 'yes', 'on'].includes(value.toLowerCase());
+};
+
 export const jupiterApiConfig: JupiterApiConfig = {
-  // 🔥 启用本地 API（延迟 <5ms）
-  useLocalApi: process.env.USE_LOCAL_JUPITER_API === 'true' || true,
+  // 🔥 默认使用官方 Ultra API，除非显式启用本地
+  useLocalApi: shouldUseLocalApi(process.env.USE_LOCAL_JUPITER_API),
   
   // 本地 API 地址
   localApiUrl: process.env.JUPITER_LOCAL_API || 'http://localhost:8080',
@@ -33,8 +38,8 @@ export const jupiterApiConfig: JupiterApiConfig = {
   // 启用 fallback
   fallbackToRemote: true,
   
-  // 本地 API 超时（毫秒）
-  timeout: 5000, // 本地应该很快
+  // API 超时（毫秒）
+  timeout: 5000,
 };
 
 /**

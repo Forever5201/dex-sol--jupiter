@@ -28,6 +28,7 @@ export * from './flashloan';
 
 // 导出网络配置模块（统一代理管理）
 export * from './network/proxy-config';
+export * from './network/unified-adapter';
 
 // 导出工具模块
 // export { PriorityFeeEstimator } from './utils/priority-fee-estimator';

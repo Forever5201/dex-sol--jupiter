@@ -35,6 +35,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
 import { Connection, ConnectionConfig } from '@solana/web3.js';
+import { autoSetupProxyEnv } from './windows-proxy-detector';
 
 /**
  * 代理类型
@@ -81,6 +82,9 @@ class UnifiedNetworkAdapter {
   private initialized = false;
 
   private constructor() {
+    // 🌐 自动检测并设置 Windows 系统代理（如果环境变量未设置）
+    autoSetupProxyEnv();
+    
     this.config = this.loadConfig();
     this.initializeAgents();
     this.globalAxiosInstance = this.createGlobalAxiosInstance();
@@ -340,13 +344,34 @@ class UnifiedNetworkAdapter {
 
     // 使用代理配置
     if (this.httpsAgent) {
-      const customFetch = (input: any, init?: any) => {
+      // Node.js 18+ 原生 fetch 不支持 agent 参数
+      // 需要使用 node-fetch 或 undici
+      let customFetch: any;
+      
+      try {
+        // 尝试使用 node-fetch（如果已安装）
+        const nodeFetch = require('node-fetch');
+        customFetch = (input: any, init?: any) => {
         const fetchOptions = {
           ...init,
           agent: this.httpsAgent,
         };
-        return fetch(input, fetchOptions);
+          return nodeFetch(input, fetchOptions);
       };
+      } catch (error) {
+        // 如果 node-fetch 未安装，尝试使用 undici（Node.js 18+ 内置）
+        try {
+          const { fetch: undiciFetch } = require('undici');
+          // undici 不支持 agent，但可以通过 dispatcher 配置代理
+          // 这里我们回退到原生 fetch（可能无法使用代理）
+          console.warn('⚠️ [NetworkAdapter] node-fetch not available, proxy may not work with native fetch');
+          customFetch = fetch;
+        } catch {
+          // 如果都没有，使用原生 fetch（代理可能不工作）
+          console.warn('⚠️ [NetworkAdapter] Cannot use proxy: node-fetch not available');
+          customFetch = fetch;
+        }
+      }
 
       return new Connection(endpoint, {
         ...config,

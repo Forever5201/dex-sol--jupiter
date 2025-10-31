@@ -267,22 +267,30 @@ impl DexPool for RaydiumAmmInfo {
     where
         Self: Sized,
     {
-        // Try full structure first (752 bytes)
-        if let Ok(pool) = Self::try_from_slice(data) {
+        // Check for "serum" prefix in 388-byte pools
+        // 388-byte pools have a 5-byte "serum" prefix, 752-byte pools don't
+        let data_to_parse = if data.len() == 388 && data.starts_with(b"serum") {
+            // Skip the 5-byte "serum" prefix
+            &data[5..]
+        } else {
+            data
+        };
+        
+        // Try full structure first (752 bytes or 383 bytes after prefix removal)
+        if let Ok(pool) = Self::try_from_slice(data_to_parse) {
             return Ok(pool);
         }
         
-        // If that fails, try simplified structure (388 bytes)
-        // Some pools may be older versions or have fewer fields
-        if data.len() == 388 {
-            if let Ok(simple_pool) = RaydiumAmmInfoSimple::try_from_slice(data) {
-                return Ok(simple_pool.into());
-            }
+        // If standard parsing fails, try simplified structure
+        // Note: 388-byte pools become 383 bytes after removing "serum" prefix
+        if let Ok(simple_pool) = RaydiumAmmInfoSimple::try_from_slice(data_to_parse) {
+            return Ok(simple_pool.into());
         }
         
         Err(DexError::DeserializationFailed(format!(
-            "Raydium V4: Unexpected length of input, Data length: {} bytes",
-            data.len()
+            "Raydium V4: Unexpected length of input, Data length: {} bytes (parsed: {} bytes)",
+            data.len(),
+            data_to_parse.len()
         )))
     }
     
@@ -320,12 +328,14 @@ impl DexPool for RaydiumAmmInfo {
 }
 
 // ============================================
-// Simplified Raydium AMM Structure (388 bytes)
+// Simplified Raydium AMM Structure (383 bytes after "serum" prefix)
 // ============================================
-// For older or simplified Raydium pools that don't have all fee fields
+// For older Raydium V4 pools with "serum" prefix
+// Structure: 16 u64 + 7 Pubkeys + 3 u64 + 7 bytes padding = 383 bytes
 
 #[derive(Clone, Debug, BorshDeserialize, BorshSerialize)]
 pub struct RaydiumAmmInfoSimple {
+    // 16 u64 header fields (128 bytes)
     pub status: u64,
     pub nonce: u64,
     pub order_num: u64,
@@ -343,37 +353,27 @@ pub struct RaydiumAmmInfoSimple {
     pub max_price_multiplier: u64,
     pub system_decimal_value: u64,
     
-    // Pubkeys (12 * 32 = 384 bytes)
+    // 7 Pubkeys (224 bytes) - older version has fewer Pubkeys
     pub coin_mint: Pubkey,
     pub pc_mint: Pubkey,
     pub lp_mint: Pubkey,
-    pub open_orders: Pubkey,
-    pub market_id: Pubkey,
-    pub market_program_id: Pubkey,
-    pub target_orders: Pubkey,
-    pub withdraw_queue: Pubkey,
     pub coin_vault: Pubkey,
     pub pc_vault: Pubkey,
-    pub coin_vault_mint: Pubkey,
-    pub pc_vault_mint: Pubkey,
+    pub market_id: Pubkey,
+    pub open_orders: Pubkey,
     
-    // Critical reserve fields
+    // 3 critical reserve fields (24 bytes)
     pub coin_vault_amount: u64,
     pub pc_vault_amount: u64,
     pub lp_supply: u64,
     
-    // Minimal fees (3 u64 instead of 27)
-    pub min_fees: [u64; 3],
+    // 7 bytes padding to reach 383 bytes
+    pub padding: [u8; 7],
 }
 
 // Convert simplified to full structure
 impl From<RaydiumAmmInfoSimple> for RaydiumAmmInfo {
     fn from(simple: RaydiumAmmInfoSimple) -> Self {
-        let mut fees = [0u64; 27];
-        fees[0] = simple.min_fees[0];
-        fees[1] = simple.min_fees[1];
-        fees[2] = simple.min_fees[2];
-        
         Self {
             status: simple.status,
             nonce: simple.nonce,
@@ -396,17 +396,17 @@ impl From<RaydiumAmmInfoSimple> for RaydiumAmmInfo {
             lp_mint: simple.lp_mint,
             open_orders: simple.open_orders,
             market_id: simple.market_id,
-            market_program_id: simple.market_program_id,
-            target_orders: simple.target_orders,
-            withdraw_queue: simple.withdraw_queue,
+            market_program_id: Pubkey::default(), // Not in simple version
+            target_orders: Pubkey::default(),      // Not in simple version
+            withdraw_queue: Pubkey::default(),     // Not in simple version
             coin_vault: simple.coin_vault,
             pc_vault: simple.pc_vault,
-            coin_vault_mint: simple.coin_vault_mint,
-            pc_vault_mint: simple.pc_vault_mint,
+            coin_vault_mint: Pubkey::default(),    // Not in simple version
+            pc_vault_mint: Pubkey::default(),      // Not in simple version
             coin_vault_amount: simple.coin_vault_amount,
             pc_vault_amount: simple.pc_vault_amount,
             lp_supply: simple.lp_supply,
-            fees,
+            fees: [0; 27], // Simple version has no fee fields
         }
     }
 }

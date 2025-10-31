@@ -163,9 +163,18 @@ class OnChainBot {
         maxConcurrent: this.config.rpc.max_concurrent,
       });
 
-      // 2. 加载密钥对
+      // 2. 加载密钥对（智能检测：优先使用环境变量，否则使用配置文件路径）
+      // 优先级：SOLANA_PRIVATE_KEY > SOLANA_KEYPAIR_PATH > config.keypair.path
+      if (process.env.SOLANA_PRIVATE_KEY) {
+        logger.info('🔑 Using keypair from environment variable: SOLANA_PRIVATE_KEY');
+        this.keypair = KeypairManager.load();
+      } else if (process.env.SOLANA_KEYPAIR_PATH) {
+        logger.info(`🔑 Using keypair from environment variable: SOLANA_KEYPAIR_PATH=${process.env.SOLANA_KEYPAIR_PATH}`);
+        this.keypair = KeypairManager.load();
+      } else {
       logger.info(`Loading keypair from ${this.config.keypair.path}...`);
       this.keypair = KeypairManager.loadFromFile(this.config.keypair.path);
+      }
       
       // 检查余额
       const balance = await KeypairManager.getBalance(

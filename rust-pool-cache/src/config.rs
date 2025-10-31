@@ -11,6 +11,12 @@ pub struct Config {
     pub pools: Vec<PoolConfig>,
     #[serde(default)]
     pub router: Option<RouterConfig>,
+    #[serde(default)]
+    pub logging: Option<LogConfig>,
+    #[serde(default)]
+    pub simulation: Option<SimulationConfig>,  // 🎯 链上模拟配置
+    #[serde(default)]
+    pub initialization: Option<InitializationConfig>,  // 🚀 池子初始化配置
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +61,25 @@ fn default_pool_type() -> String {
     "amm_v4".to_string()
 }
 
+/// Logging configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default = "default_true")]
+    pub file_enabled: bool,
+    #[serde(default = "default_price_change_threshold")]
+    pub price_change_threshold_percent: f64,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_price_change_threshold() -> f64 {
+    1.0  // 1% price change threshold
+}
+
 /// Router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterConfig {
@@ -70,6 +95,8 @@ pub struct RouterConfig {
     pub bellman_ford: Option<BellmanFordConfig>,
     #[serde(default)]
     pub split_optimizer: Option<SplitOptimizerConfig>,
+    #[serde(default)]
+    pub event_driven: Option<EventDrivenConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +151,109 @@ fn default_min_split_amount() -> f64 {
 
 fn default_slippage_model() -> String {
     "constant_product".to_string()
+}
+
+/// Event-driven router configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventDrivenConfig {
+    #[serde(default = "default_event_driven_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_debounce_ms")]
+    pub debounce_ms: u64,
+    #[serde(default = "default_price_change_threshold_percent")]
+    pub price_change_threshold_percent: f64,
+    #[serde(default = "default_validation_strategy")]
+    pub validation_strategy: String,
+    #[serde(default = "default_max_concurrent_scans")]
+    pub max_concurrent_scans: usize,
+}
+
+fn default_event_driven_enabled() -> bool {
+    true
+}
+
+fn default_debounce_ms() -> u64 {
+    100
+}
+
+fn default_price_change_threshold_percent() -> f64 {
+    0.5
+}
+
+fn default_validation_strategy() -> String {
+    "immediate".to_string()
+}
+
+fn default_max_concurrent_scans() -> usize {
+    3
+}
+
+/// 🎯 链上模拟配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulationConfig {
+    /// 是否启用链上模拟验证
+    #[serde(default)]
+    pub enabled: bool,
+    /// RPC URL（用于链上查询）
+    #[serde(default)]
+    pub rpc_url: Option<String>,
+    /// 最小置信度才触发模拟
+    #[serde(default = "default_min_confidence")]
+    pub min_confidence_for_simulation: f64,
+    /// 最大并发模拟数
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent_simulations: usize,
+    /// 模拟超时（毫秒）
+    #[serde(default = "default_simulation_timeout")]
+    pub simulation_timeout_ms: u64,
+}
+
+fn default_min_confidence() -> f64 {
+    80.0
+}
+
+fn default_max_concurrent() -> usize {
+    10
+}
+
+fn default_simulation_timeout() -> u64 {
+    500
+}
+
+/// 🚀 池子初始化配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitializationConfig {
+    /// 是否启用启动时主动查询池子
+    #[serde(default = "default_init_enabled")]
+    pub enabled: bool,
+    /// RPC URLs（支持多个，轮询使用）
+    #[serde(default)]
+    pub rpc_urls: Vec<String>,
+    /// 批量查询大小（最大100）
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// 查询超时（毫秒）
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+    /// 失败重试次数
+    #[serde(default = "default_max_retries")]
+    pub max_retries: usize,
+}
+
+fn default_init_enabled() -> bool {
+    true
+}
+
+fn default_batch_size() -> usize {
+    100
+}
+
+fn default_timeout_ms() -> u64 {
+    5000
+}
+
+fn default_max_retries() -> usize {
+    3
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +344,7 @@ mod tests {
             proxy: None,
             database: None,
             router: None,
+            logging: None,
             pools: vec![
                 PoolConfig {
                     address: "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2".to_string(),

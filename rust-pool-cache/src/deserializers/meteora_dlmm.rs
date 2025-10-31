@@ -121,11 +121,20 @@ pub struct MeteoraPoolState {
     /// Padding
     pub _padding1: [u8; 7],
     
-    /// Additional padding for future fields (align to ~896 bytes)
-    /// Current calculation: 806 bytes + 90 bytes = 896 bytes
-    /// 90 bytes = 11.25 u64, use 11 u64 (88 bytes) + 2 bytes = 90 bytes
-    pub padding: [u64; 11],
-    pub _padding2: [u8; 2],
+    /// Additional padding for future fields (align to 896 bytes after discriminator)
+    /// 
+    /// 🔍 Empirical testing shows we need MORE padding than calculated
+    /// Calculated: 752 bytes of defined fields
+    /// Target: 896 bytes (904 - 8 discriminator)
+    /// 
+    /// Trying larger padding to account for possible:
+    /// - Additional state fields in latest Meteora version
+    /// - Alignment padding inserted by Borsh
+    /// - Reserved fields for future use
+    /// 
+    /// Current approach: Use 200 bytes padding (conservative)
+    /// This leaves room for ~7 additional u64 fields or alignment
+    pub padding: [u8; 200],
 }
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -224,12 +233,23 @@ impl DexPool for MeteoraPoolState {
         
         let data_to_parse = &data[8..];
         
+        // 🚨 Temporary workaround: Skip this pool type until we get the exact structure
+        // The official Meteora SDK structure may have changed or have additional fields
+        // TODO: Query Meteora's official TypeScript SDK or on-chain program IDL
+        return Err(DexError::DeserializationFailed(format!(
+            "Meteora DLMM: Temporarily disabled - structure mismatch (data: {} bytes, need exact IDL)",
+            data_to_parse.len()
+        )));
+        
+        // Original deserialization code (commented out)
+        /*
         Self::try_from_slice(data_to_parse)
             .map_err(|e| DexError::DeserializationFailed(format!(
                 "Meteora DLMM: {} (data length: {} bytes, expected ~896 bytes after discriminator)",
                 e,
                 data_to_parse.len()
             )))
+        */
     }
     
     fn calculate_price(&self) -> f64 {
@@ -263,6 +283,17 @@ impl DexPool for MeteoraPoolState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::size_of;
+    
+    #[test]
+    fn test_structure_sizes() {
+        println!("PoolParameters size: {}", size_of::<PoolParameters>());
+        println!("MeteoraPoolState size: {}", size_of::<MeteoraPoolState>());
+        println!("Expected: 896 bytes (904 - 8 discriminator)");
+        
+        // Verify PoolParameters is 32 bytes
+        assert_eq!(size_of::<PoolParameters>(), 32, "PoolParameters should be 32 bytes");
+    }
     
     #[test]
     fn test_price_calculation() {
@@ -320,8 +351,7 @@ mod tests {
             base_key: Pubkey::default(),
             activation_type: 0,
             _padding1: [0; 7],
-            padding: [0; 11],
-            _padding2: [0; 2],
+            padding: [0; 200],
         };
         
         // At active_id = 0, price should be 1.0
@@ -397,8 +427,7 @@ mod tests {
             base_key: Pubkey::default(),
             activation_type: 0,
             _padding1: [0; 7],
-            padding: [0; 11],
-            _padding2: [0; 2],
+            padding: [0; 200],
         };
         
         assert!(pool.is_in_range());

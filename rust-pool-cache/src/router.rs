@@ -114,6 +114,7 @@ impl ArbitragePath {
 }
 
 /// 智能路由器
+#[derive(Clone)]
 pub struct Router {
     /// 价格缓存
     price_cache: Arc<PriceCache>,

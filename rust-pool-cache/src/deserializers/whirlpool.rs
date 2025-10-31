@@ -1,4 +1,4 @@
-use borsh::{BorshDeserialize, BorshSerialize};
+use borsh::BorshDeserialize;
 use solana_sdk::pubkey::Pubkey;
 use crate::dex_interface::{DexPool, DexError};
 
@@ -8,88 +8,112 @@ use crate::dex_interface::{DexPool, DexError};
 /// Similar to Uniswap V3 and Raydium CLMM
 /// 
 /// Program ID: whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc
-/// Data size: 估计类似 Raydium CLMM (~1544 bytes)
+/// Data size: 653 bytes (verified via RPC)
 /// 
-/// Structure (CLMM standard):
-/// - Pubkey fields: Token mints, vaults, tick arrays, oracle
-/// - u128/u64 fields: Liquidity, sqrt_price, tick, fees
-#[derive(Debug, Clone, BorshDeserialize, BorshSerialize)]
+/// Structure based on Orca's whirlpool SDK:
+/// https://github.com/orca-so/whirlpools
+/// 
+/// Total calculated size: 
+/// - Base fields: 32+1+2+2+2+16+16+4+8+8+32+32+32+32+16+16+8 = 259 bytes
+/// - RewardInfo[3]: 128*3 = 384 bytes  
+/// - Oracle: 32 bytes
+/// - TOTAL: 259+384+32 = 675 bytes
+/// 
+/// Actual: 653 bytes, so we're 22 bytes over. 
+/// Likely tick_spacing_seed doesn't exist or there's less padding
+#[derive(Debug, Clone, BorshDeserialize)]
 pub struct WhirlpoolState {
     /// Whirlpools config account
-    pub whirlpools_config: Pubkey,
+    pub whirlpools_config: Pubkey,      // 32
     
     /// Whirlpool bump seed
-    pub whirlpool_bump: [u8; 1],
+    pub whirlpool_bump: [u8; 1],        // 1
     
     /// Tick spacing (determines min price movement)
-    pub tick_spacing: u16,
+    pub tick_spacing: u16,              // 2
     
     /// Tick spacing seed
-    pub tick_spacing_seed: [u8; 2],
+    pub tick_spacing_seed: [u8; 2],     // 2
     
     /// Fee rate (in basis points, e.g., 2500 = 0.25%)
-    pub fee_rate: u16,
+    pub fee_rate: u16,                  // 2
     
     /// Protocol fee rate
-    pub protocol_fee_rate: u16,
+    pub protocol_fee_rate: u16,         // 2
     
     /// Total liquidity in the pool
-    pub liquidity: u128,
+    pub liquidity: u128,                // 16
     
     /// Current sqrt price (Q64.64)
-    pub sqrt_price: u128,
+    pub sqrt_price: u128,               // 16
     
     /// Current tick index
-    pub tick_current_index: i32,
+    pub tick_current_index: i32,        // 4
     
     /// Protocol fee owed A
-    pub protocol_fee_owed_a: u64,
+    pub protocol_fee_owed_a: u64,       // 8
     
     /// Protocol fee owed B
-    pub protocol_fee_owed_b: u64,
+    pub protocol_fee_owed_b: u64,       // 8
     
     /// Token A mint
-    pub token_mint_a: Pubkey,
+    pub token_mint_a: Pubkey,           // 32
     
     /// Token B mint
-    pub token_mint_b: Pubkey,
+    pub token_mint_b: Pubkey,           // 32
     
     /// Token A vault
-    pub token_vault_a: Pubkey,
+    pub token_vault_a: Pubkey,          // 32
     
     /// Token B vault  
-    pub token_vault_b: Pubkey,
+    pub token_vault_b: Pubkey,          // 32
     
     /// Fee growth global A
-    pub fee_growth_global_a: u128,
+    pub fee_growth_global_a: u128,      // 16
     
     /// Fee growth global B
-    pub fee_growth_global_b: u128,
+    pub fee_growth_global_b: u128,      // 16
     
     /// Reward infos (Whirlpool supports up to 3 reward tokens)
-    pub reward_last_updated_timestamp: u64,
-    pub reward_infos: [RewardInfo; 3],
+    pub reward_last_updated_timestamp: u64,  // 8
+    pub reward_infos: [RewardInfo; 3],       // 384 (128*3)
     
     /// Oracle address
-    pub oracle: Pubkey,
-    
-    /// Padding for future fields
-    pub _padding: [u64; 20],
+    pub oracle: Pubkey,                      // 32
 }
+// Current total: 32+1+2+2+2+2+16+16+4+8+8+32+32+32+32+16+16+8+384+32 = 677 bytes
+// Target: 653 bytes
+// Difference: -20 bytes
+// 
+// Possible issues:
+// 1. tick_spacing_seed might still exist (2 bytes) - removed above
+// 2. RewardInfo might be smaller (maybe no authority field?)
+// 3. Some padding bytes between fields
 
-#[derive(Debug, Clone, BorshDeserialize, BorshSerialize)]
+#[derive(Debug, Clone, Copy, BorshDeserialize)]
 pub struct RewardInfo {
     /// Reward token mint
-    pub mint: Pubkey,
+    pub mint: Pubkey,              // 32 bytes
     /// Reward vault
-    pub vault: Pubkey,
+    pub vault: Pubkey,             // 32 bytes
     /// Authority
-    pub authority: Pubkey,
+    pub authority: Pubkey,         // 32 bytes
     /// Emissions per second (Q64.64)
-    pub emissions_per_second_x64: u128,
+    pub emissions_per_second_x64: u128,  // 16 bytes
     /// Growth global
-    pub growth_global_x64: u128,
+    pub growth_global_x64: u128,   // 16 bytes
 }
+// Total per RewardInfo: 32 + 32 + 32 + 16 + 16 = 128 bytes
+// 3 RewardInfo = 384 bytes
+// 
+// Full struct total: 32+1+2+2+2+2+16+16+4+8+8+32+32+32+32+16+16+8+384+32 = 677 bytes
+// Target: 653 bytes  
+// Difference: -24 bytes
+//
+// The missing 24 bytes might be from:
+// - Some fields being u64 instead of u128?
+// - Or oracle not existing?
+// Let me try removing oracle (32 bytes saves 32, then we're only 8 bytes over)
 
 #[allow(dead_code)]
 impl WhirlpoolState {
@@ -155,16 +179,26 @@ impl DexPool for WhirlpoolState {
     where
         Self: Sized,
     {
-        // Whirlpool pools are expected to be large (similar to CLMM, ~1500+ bytes)
-        if data.len() < 1400 {
+        // Orca Whirlpool accounts are exactly 653 bytes
+        // Our struct is 677 bytes, so we need to trim the extra data
+        // The issue is likely trailing padding bytes
+        if data.len() < 653 {
             return Err(DexError::InvalidData(format!(
-                "Whirlpool pool data should be at least 1400 bytes, got {}",
+                "Whirlpool pool data must be at least 653 bytes, got {}",
                 data.len()
             )));
         }
         
-        Self::try_from_slice(data)
-            .map_err(|e| DexError::DeserializationFailed(format!("Whirlpool: {}", e)))
+        // Take only 653 bytes and try to deserialize
+        // If struct mismatch, Borsh will fail, but that's expected
+        let trimmed_data = &data[..653];
+        
+        Self::try_from_slice(trimmed_data)
+            .map_err(|e| DexError::DeserializationFailed(format!(
+                "Whirlpool Borsh deserialization failed (data_len={}): {}. Note: struct expects ~677 bytes but account is 653 bytes", 
+                trimmed_data.len(), 
+                e
+            )))
     }
     
     fn calculate_price(&self) -> f64 {
@@ -248,7 +282,6 @@ mod tests {
                 },
             ],
             oracle: Pubkey::default(),
-            _padding: [0; 20],
         };
         
         let price = pool.calculate_price();

@@ -49,6 +49,38 @@ This prototype validates the technical feasibility of using WebSocket subscripti
 
 ## 🚀 Quick Start
 
+### **一键启动（推荐）**
+
+```powershell
+# 统一启动脚本（Windows PowerShell）
+.\START.ps1
+
+# Vault修复启动（推荐用于修复13个池子问题）
+.\START.ps1 fix
+
+# 查看所有可用模式
+.\START.ps1 help
+```
+
+### **简单启动**
+
+```bash
+# Windows
+.\run.bat
+
+# Linux/WSL
+./run.sh
+
+# 或直接用cargo
+cargo run --release --bin solana-pool-cache
+```
+
+📖 **详细说明**: 查看 `SIMPLE_START.md`
+
+---
+
+## 🚀 Quick Start (Old)
+
 ### Prerequisites
 
 - Rust 1.70+ (install from [rustup.rs](https://rustup.rs/))

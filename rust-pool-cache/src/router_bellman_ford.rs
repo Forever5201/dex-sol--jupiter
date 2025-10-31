@@ -43,6 +43,7 @@ struct NegativeCycle {
 }
 
 /// Bellman-Ford 扫描器
+#[derive(Clone)]
 pub struct BellmanFordScanner {
     /// 最大跳数限制
     max_hops: usize,

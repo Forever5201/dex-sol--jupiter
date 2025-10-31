@@ -1,0 +1,154 @@
+# ============================================
+# 推荐的LST池子配置
+# ============================================
+# 
+# 基于Solana生态系统知识和最佳实践
+# 这些是高流动性的LST池子候选地址
+# 
+# ⚠️ 使用前必须验证：
+# 1. 访问 https://solscan.io/<地址> 确认池子存在
+# 2. 检查账户大小匹配池子类型
+# 3. 确认Owner是正确的程序ID  
+# 4. 查看24小时交易量和流动性
+#
+# ============================================
+
+# ============================================
+# 1. Phoenix CLOB - LST市场（已在config.toml中）
+# ============================================
+
+[[pools]]
+address = "FZRgpfpvicJ3p23DfmZuvUgcQZBHJsWScTf2N2jK8dy6"
+name = "mSOL/SOL (Phoenix)"
+pool_type = "phoenix"
+# ✅ 状态: 已配置
+# 流动性: 高
+# 更新频率: 实时
+# 推荐: 保持现有配置
+
+# ============================================
+# 2. Raydium AMM V4 - LST池子（需要查找准确地址）
+# ============================================
+
+# mSOL/USDC 池子
+# 
+# 查找方法:
+# 1. 访问 https://raydium.io/liquidity-pools/
+# 2. 搜索 "mSOL"
+# 3. 找到 mSOL/USDC 池子
+# 4. 复制池子地址（ammId）
+# 5. 使用Solscan验证:
+#    - 账户大小应为 752 字节
+#    - Owner应为 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
+#
+# [[pools]]
+# address = "<从Raydium查找>"
+# name = "mSOL/USDC (Raydium V4)"
+# pool_type = "amm_v4"
+
+# mSOL/SOL 池子
+#
+# 注意: 之前的地址 ZfvDXXUhZDzDVsapffUyXHj9ByCoPjP4thL6YXcZ9ixY 验证失败
+# 需要从Raydium官网重新查找准确地址
+#
+# [[pools]]
+# address = "<从Raydium查找>"
+# name = "mSOL/SOL (Raydium V4)"
+# pool_type = "amm_v4"
+
+# jitoSOL/SOL 池子
+#
+# [[pools]]
+# address = "<从Raydium查找>"
+# name = "jitoSOL/SOL (Raydium V4)"
+# pool_type = "amm_v4"
+
+# jitoSOL/USDC 池子
+#
+# [[pools]]
+# address = "<从Raydium查找>"
+# name = "jitoSOL/USDC (Raydium V4)"
+# pool_type = "amm_v4"
+
+# ============================================
+# 3. Orca Whirlpool - LST池子（需要实现反序列化器）
+# ============================================
+
+# ⚠️ 注意: Orca Whirlpool需要专门的反序列化器
+# 当前Rust Pool Cache可能不支持Whirlpool类型
+# 建议优先使用Raydium V4和Phoenix池子
+
+# mSOL/USDC Whirlpool
+# [[pools]]
+# address = "<从Orca查找>"
+# name = "mSOL/USDC (Orca Whirlpool)"
+# pool_type = "whirlpool"
+# 状态: 需要实现反序列化器
+
+# ============================================
+# 4. Sanctum - LST聚合器（推荐长期方案）
+# ============================================
+
+# Sanctum是最佳LST流动性来源
+# Program ID: SPoo1Ku8WFXoNDMHPsrGSTSG1Y47rzgn41SLUNakuHy
+#
+# 优势:
+# - 覆盖所有主流LST
+# - 最深流动性
+# - 即时兑换
+# - 价格发现最准确
+#
+# 实施步骤:
+# 1. 研究Sanctum协议（2小时）
+# 2. 实现Sanctum反序列化器（4-6小时）
+# 3. 查找Sanctum主要池子地址（1小时）
+# 4. 添加到配置并测试（1小时）
+#
+# [[pools]]
+# address = "<从Sanctum查找>"
+# name = "LST Aggregator (Sanctum)"
+# pool_type = "sanctum"
+# 状态: 需要实现
+
+# ============================================
+# 5. 查找池子地址的实用链接
+# ============================================
+#
+# Raydium流动性池:
+#   https://raydium.io/liquidity-pools/
+#
+# Orca Whirlpools:
+#   https://www.orca.so/pools
+#
+# Phoenix市场:
+#   https://phoenix.trade/
+#
+# Sanctum:
+#   https://app.sanctum.so/
+#
+# Solscan代币浏览:
+#   mSOL:    https://solscan.io/token/mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So
+#   jitoSOL: https://solscan.io/token/J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn
+#   bSOL:    https://solscan.io/token/bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1
+#
+# ============================================
+# 验证池子地址的命令
+# ============================================
+#
+# 使用Solana CLI验证池子:
+#   solana account <POOL_ADDRESS>
+#
+# 使用web3.js验证:
+#   const accountInfo = await connection.getAccountInfo(poolAddress);
+#   console.log('Size:', accountInfo.data.length);
+#   console.log('Owner:', accountInfo.owner.toBase58());
+#
+# 预期结果:
+#   Raydium V4:  Size=752, Owner=675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
+#   Orca Whirlpool:  Size=~1400, Owner=whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc
+#   Phoenix CLOB:    Size=~1.7MB, Owner=PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY
+#
+# ============================================
+
+
+

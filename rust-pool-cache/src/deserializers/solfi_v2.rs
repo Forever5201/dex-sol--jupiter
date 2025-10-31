@@ -173,8 +173,11 @@ impl DexPool for SolFiV2PoolState {
     }
     
     fn is_active(&self) -> bool {
-        // Pool is active if reserves are non-zero
-        self.get_reserve_a() > 0 || self.get_reserve_b() > 0
+        // ✅ FIX: SolFi V2 使用Vault模式，储备量在外部vault账户中
+        // 不能检查池子账户的储备量（永远为0），而应该检查vault地址是否有效
+        // 这样才能触发vault订阅流程
+        self.token_a_vault() != &Pubkey::default() && 
+        self.token_b_vault() != &Pubkey::default()
     }
     
     fn get_additional_info(&self) -> Option<String> {

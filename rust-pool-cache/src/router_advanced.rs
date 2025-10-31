@@ -17,6 +17,7 @@ use crate::router_bellman_ford::BellmanFordScanner;
 use crate::router_split_optimizer::{SplitOptimizer, OptimizedPath};
 use crate::price_cache::PriceCache;
 use std::sync::Arc;
+use tracing::{info, debug, warn};
 
 /// 路由器模式
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -65,6 +66,7 @@ impl Default for AdvancedRouterConfig {
 }
 
 /// 高级路由器
+#[derive(Clone)]
 pub struct AdvancedRouter {
     /// 快速扫描器（现有混合算法）
     quick_scanner: Router,
@@ -105,7 +107,11 @@ impl AdvancedRouter {
     
     /// 快速扫描（仅2-3跳）
     async fn fast_scan(&self, amount: f64) -> Vec<OptimizedPath> {
+        println!("   🚀 Fast scan mode: 2-3 hop only");
+        
+        let scan_start = tokio::time::Instant::now();
         let paths = self.quick_scanner.find_all_opportunities(amount);
+        println!("   ⚡ Found {} paths in {:?}", paths.len(), scan_start.elapsed());
         
         // 转换为OptimizedPath
         let optimized: Vec<OptimizedPath> = paths.into_iter()
@@ -117,35 +123,80 @@ impl AdvancedRouter {
             })
             .collect();
         
+        let before_filter = optimized.len();
+        let filtered: Vec<OptimizedPath> = optimized.into_iter()
+            .filter(|p| p.optimized_roi >= self.config.min_roi_percent)
+            .collect();
+        
+        let filtered_out = before_filter - filtered.len();
+        if filtered_out > 0 {
+            println!("   ⛔ Filtered out {} paths (ROI < {}%)", filtered_out, self.config.min_roi_percent);
+        }
+        
         // 如果启用拆分优化
-        if self.config.enable_split_optimization {
-            self.split_optimizer.optimize_all(&optimized.iter().map(|o| o.base_path.clone()).collect::<Vec<_>>(), amount)
+        if self.config.enable_split_optimization && !filtered.is_empty() {
+            println!("   💎 Applying split optimization...");
+            self.split_optimizer.optimize_all(&filtered.iter().map(|o| o.base_path.clone()).collect::<Vec<_>>(), amount)
         } else {
-            optimized
+            filtered
         }
     }
     
     /// 完整扫描（2-6跳全覆盖）
     async fn complete_scan(&self, amount: f64) -> Vec<OptimizedPath> {
-        let all_prices = self.price_cache.get_all_prices();
+        println!("   📡 Fetching price data...");
+        
+        // 🎯 数据一致性：放宽要求以适应实际情况
+        // 参数：10000ms新鲜度（10秒），50 slot差异（约20秒）
+        let consistent_prices = self.price_cache.get_consistent_snapshot(10000, 50);
+        
+        // 如果一致性数据太少，降级到仅新鲜度过滤
+        let all_prices = if consistent_prices.len() < 10 {
+            println!("   ⚠️  Consistent snapshot too small ({}), falling back to fresh prices", consistent_prices.len());
+            self.price_cache.get_fresh_prices(60000)  // 60秒
+        } else {
+            println!("   ✅ Using consistent snapshot with {} pools", consistent_prices.len());
+            consistent_prices
+        };
+        
+        if all_prices.is_empty() {
+            println!("   ❌ No fresh prices available!");
+            return Vec::new();
+        }
+        
+        // 记录数据质量统计
+        let latest_slot = self.price_cache.get_latest_slot();
+        println!("   📊 Latest slot: {}, using {} pools for routing", latest_slot, all_prices.len());
         
         // 并行执行快速扫描和深度扫描
+        println!("   🚀 Starting parallel scan: Quick (2-3 hop) + Bellman-Ford (4-6 hop)");
+        
+        let quick_start = tokio::time::Instant::now();
         let quick_future = async {
             self.quick_scanner.find_all_opportunities(amount)
         };
         
+        let deep_start = tokio::time::Instant::now();
         let deep_future = async {
             self.bf_scanner.find_all_cycles(&all_prices, amount)
         };
         
         let (quick_paths, deep_paths) = tokio::join!(quick_future, deep_future);
         
+        println!("   ⚡ Quick scan: {} paths in {:?}", quick_paths.len(), quick_start.elapsed());
+        println!("   🔍 Bellman-Ford: {} paths in {:?}", deep_paths.len(), deep_start.elapsed());
+        
         // 合并所有路径
         let mut all_paths = quick_paths;
         all_paths.extend(deep_paths);
+        let total_before_dedup = all_paths.len();
         
         // 去重（可能同一个机会被两个算法都发现）
         all_paths = self.deduplicate_paths(all_paths);
+        let duplicates_removed = total_before_dedup - all_paths.len();
+        if duplicates_removed > 0 {
+            println!("   🔄 Removed {} duplicate paths", duplicates_removed);
+        }
         
         // 转换为OptimizedPath
         let base_optimized: Vec<OptimizedPath> = all_paths.into_iter()
@@ -157,14 +208,30 @@ impl AdvancedRouter {
             })
             .collect();
         
+        let before_filter = base_optimized.len();
+        println!("   📋 Total paths before filtering: {}", before_filter);
+        
+        // Filter by ROI threshold
+        let filtered: Vec<OptimizedPath> = base_optimized.into_iter()
+            .filter(|p| p.optimized_roi >= self.config.min_roi_percent)
+            .collect();
+        
+        let filtered_out = before_filter - filtered.len();
+        if filtered_out > 0 {
+            println!("   ⛔ Filtered out {} paths (ROI < {}%)", filtered_out, self.config.min_roi_percent);
+        }
+        
         // 应用拆分优化
-        if self.config.enable_split_optimization {
-            self.split_optimizer.optimize_all(
-                &base_optimized.iter().map(|o| o.base_path.clone()).collect::<Vec<_>>(),
+        if self.config.enable_split_optimization && !filtered.is_empty() {
+            println!("   💎 Applying split optimization to {} paths...", filtered.len());
+            let optimized = self.split_optimizer.optimize_all(
+                &filtered.iter().map(|o| o.base_path.clone()).collect::<Vec<_>>(),
                 amount
-            )
+            );
+            println!("   ✅ Split optimization complete: {} final paths", optimized.len());
+            optimized
         } else {
-            base_optimized
+            filtered
         }
     }
     
@@ -176,13 +243,13 @@ impl AdvancedRouter {
         // 如果找到高质量机会（ROI > 1%），直接返回
         if let Some(best) = quick_results.first() {
             if best.optimized_roi > 1.0 {
-                println!("🎯 Hybrid mode: Found excellent quick opportunity ({}% ROI), skipping deep scan", best.optimized_roi);
+                info!("Hybrid mode: Found excellent quick opportunity ({}% ROI), skipping deep scan", best.optimized_roi);
                 return quick_results;
             }
         }
         
         // 否则进行完整扫描
-        println!("🔍 Hybrid mode: No excellent quick opportunity, running complete scan...");
+        debug!("Hybrid mode: No excellent quick opportunity, running complete scan...");
         self.complete_scan(amount).await
     }
     

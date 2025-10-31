@@ -25,8 +25,8 @@
     "test-jupiter": "tsx examples/test-jupiter-swap.ts",
     "start:onchain-bot": "tsx packages/onchain-bot/src/index.ts",
     "start:onchain-bot:prod": "node packages/onchain-bot/dist/index.js",
-    "start:flashloan": "tsx packages/jupiter-bot/src/flashloan-bot.ts",
-    "start:flashloan:prod": "node packages/jupiter-bot/dist/flashloan-bot.js",
+    "start:flashloan": "tsx packages/jupiter-bot/src/flashloan-entry.ts",
+    "start:flashloan:prod": "node packages/jupiter-bot/dist/flashloan-entry.js",
     "dev:flashloan": "tsx --watch packages/jupiter-bot/src/flashloan-bot.ts"
   },
   "pnpm": {
@@ -38,6 +38,7 @@
     "@jest/globals": "^29.7.0",
     "@solana/web3.js": "^1.98.4",
     "@types/axios": "^0.14.4",
+    "@types/bn.js": "^5.2.0",
     "@types/jest": "^29.5.11",
     "@types/node": "^20.10.0",
     "@types/ws": "^8.5.10",
@@ -54,6 +55,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@jup-ag/lend": "^0.0.101",
     "@solana/spl-token": "^0.4.14",
     "@types/express": "^5.0.3",
     "express": "^5.1.0",

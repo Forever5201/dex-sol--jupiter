@@ -204,6 +204,34 @@ export class OpportunityFinder {
       throw new Error('Cannot start without bridge tokens configuration');
     }
 
+    // 🎯 检测是否启用专项分工模式（通过环境变量）
+    const isDedicatedMode = process.env.DEDICATED_WORKER_MODE === 'true';
+    const SOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
+
+    if (isDedicatedMode) {
+      logger.info('🎯 Dedicated Worker Mode enabled');
+      
+      // 验证必要的桥接代币
+      const usdtBridge = bridgeTokens.find(b => b.symbol === 'USDT');
+      const usdcBridge = bridgeTokens.find(b => b.symbol === 'USDC');
+      
+      if (!usdtBridge || !usdcBridge) {
+        logger.error('❌ Dedicated mode requires both USDT and USDC to be enabled');
+        throw new Error('USDT and USDC must be enabled in bridge-tokens.json for dedicated mode');
+      }
+      
+      if (this.config.workerCount < 2) {
+        logger.warn(`⚠️  workerCount is ${this.config.workerCount}, but dedicated mode needs 2. Adjusting to 2.`);
+        this.config.workerCount = 2;
+      }
+      
+      // 执行专项分工创建
+      await this.createDedicatedWorkers(SOL_MINT, usdtBridge, usdcBridge, onOpportunity);
+      
+      // 跳过默认的Worker创建逻辑
+      return;
+    }
+
     // 🔥 关键修复：先计算实际会创建的Workers总数
     const bridgesPerWorker = Math.ceil(bridgeTokens.length / this.config.workerCount);
     let totalWorkersToCreate = 0;
@@ -248,6 +276,74 @@ export class OpportunityFinder {
   }
 
   /**
+   * 创建专项分工的Workers
+   * Worker 0: SOL → USDT → SOL
+   * Worker 1: SOL → USDC → SOL
+   */
+  private async createDedicatedWorkers(
+    solMint: PublicKey,
+    usdtBridge: BridgeToken,
+    usdcBridge: BridgeToken,
+    onOpportunity: (opp: ArbitrageOpportunity) => void
+  ): Promise<void> {
+    logger.info('🚀 Creating dedicated workers...');
+    
+    // 🔑 读取每个Worker的专属API Key（环境变量优先，后备使用配置文件）
+    const apiKeyWorker0 = process.env.JUPITER_API_KEY_WORKER_0 || this.config.apiKey;
+    const apiKeyWorker1 = process.env.JUPITER_API_KEY_WORKER_1 || this.config.apiKey;
+    
+    // 显示Key分配信息（脱敏）
+    logger.info(`🔑 Worker 0 API Key: ${apiKeyWorker0 ? '...' + apiKeyWorker0.slice(-8) : 'Not configured'}`);
+    logger.info(`🔑 Worker 1 API Key: ${apiKeyWorker1 ? '...' + apiKeyWorker1.slice(-8) : 'Not configured'}`);
+    
+    if (apiKeyWorker0 === apiKeyWorker1) {
+      logger.warn('⚠️  Both workers using the same API Key (quota will be shared)');
+    } else {
+      logger.info('✅ Workers using separate API Keys (independent quotas)');
+    }
+    
+    // Worker 0: SOL → USDT → SOL (使用专属Key)
+    await this.startWorker(
+      0,
+      [solMint],           // 只传SOL
+      [usdtBridge],        // 只传USDT
+      onOpportunity,
+      2,                    // 固定2个Worker
+      apiKeyWorker0        // 🔑 专属API Key
+    );
+    this.actualWorkerCount++;
+    logger.info('✅ Worker 0 created: SOL → USDT → SOL');
+    
+    // Worker 1: SOL → USDC → SOL (使用专属Key)
+    await this.startWorker(
+      1,
+      [solMint],           // 只传SOL
+      [usdcBridge],        // 只传USDC
+      onOpportunity,
+      2,                    // 固定2个Worker
+      apiKeyWorker1        // 🔑 专属API Key
+    );
+    this.actualWorkerCount++;
+    logger.info('✅ Worker 1 created: SOL → USDC → SOL');
+    
+    logger.info(`✅ Created ${this.actualWorkerCount} dedicated workers`);
+    
+    // 定期输出统计（与原逻辑相同）
+    const statsInterval = setInterval(() => {
+      if (!this.isRunning) {
+        clearInterval(statsInterval);
+        return;
+      }
+      
+      logger.info(
+        `Stats: ${this.stats.queriesTotal} queries, ` +
+        `${this.stats.opportunitiesFound} opportunities, ` +
+        `avg ${this.stats.avgQueryTimeMs.toFixed(1)}ms per query`
+      );
+    }, 60000);
+  }
+
+  /**
    * 启动单个Worker
    */
   private async startWorker(
@@ -255,7 +351,8 @@ export class OpportunityFinder {
     mints: PublicKey[],
     bridges: BridgeToken[],
     onOpportunity: (opp: ArbitrageOpportunity) => void,
-    totalWorkers: number  // 🔥 新增：实际创建的Workers总数
+    totalWorkers: number,  // 🔥 新增：实际创建的Workers总数
+    customApiKey?: string  // 🔑 新增：Worker专属API Key（可选）
   ): Promise<void> {
     // 尝试加载编译后的 .js 文件，如果不存在则使用 .ts
     let workerPath = path.join(__dirname, 'workers', 'query-worker.js');
@@ -274,7 +371,7 @@ export class OpportunityFinder {
           totalWorkers,  // 🔥 传递实际Workers总数
           config: {
             jupiterApiUrl: this.config.jupiterApiUrl,  // Ultra API URL
-            apiKey: this.config.apiKey,  // 传递API Key给worker
+            apiKey: customApiKey || this.config.apiKey,  // 🔑 使用专属Key或默认Key
             mints: mints.map(m => m.toBase58()),
             bridges: bridges,  // 传递分配的桥接代币
             amount: this.config.amount,
@@ -296,7 +393,7 @@ export class OpportunityFinder {
         totalWorkers,  // 🔥 传递实际Workers总数
         config: {
           jupiterApiUrl: this.config.jupiterApiUrl,  // Ultra API URL
-          apiKey: this.config.apiKey,  // 传递API Key给worker
+          apiKey: customApiKey || this.config.apiKey,  // 🔑 使用专属Key或默认Key
           mints: mints.map(m => m.toBase58()),
           bridges: bridges,  // 传递分配的桥接代币
           amount: this.config.amount,

@@ -1,0 +1,42 @@
+[
+  {
+    "name": "TesseraV USDC/SOL",
+    "address": "FLckHLGMJy5gEoXWwcE68Nprde1D4araK4TGLw4pQq2n",
+    "type": "tesserav",
+    "programId": "TessVdML9pBGgG9yGks7o4HewRaXVAMuoVj4x83GLQH",
+    "dataLength": 1264,
+    "discriminator": "0000000000000000",
+    "pubkeysCount": 20,
+    "u64ValuesCount": 20
+  },
+  {
+    "name": "Lifinity V2 SOL/USDC",
+    "address": "DrRd8gYMJu9XGxLhwTCPdHNLXCKHsxJtMpbn62YqmwQe",
+    "type": "lifinity_v2",
+    "programId": "2wT8Yq49kHgDzXuPxZSaeLaH1qbmGXtEyPy64bL7aD3c",
+    "dataLength": 911,
+    "discriminator": "8ff5c8114ad6c487",
+    "pubkeysCount": 20,
+    "u64ValuesCount": 8
+  },
+  {
+    "name": "Stabble USD1/USDC #2",
+    "address": "BqLJmoxkcetgwwybit9XksNTuPzeh7SpxkYExbZKmLEC",
+    "type": "stabble",
+    "programId": "swapNyd8XiQwJ6ianp9snpu4brUqFxadzvHebnAXjJZ",
+    "dataLength": 438,
+    "discriminator": "f19a6d0411b16dbc",
+    "pubkeysCount": 20,
+    "u64ValuesCount": 7
+  },
+  {
+    "name": "PancakeSwap USDC/USDT",
+    "address": "22HUWiJaTNph96KQTKZVy2wg8KzfCems5nyW7E5H5J6w",
+    "type": "pancakeswap",
+    "programId": "HpNfyc2Saw7RKkQd8nEL4khUcuPhQ7WwY1B2qjx8jxFq",
+    "dataLength": 1544,
+    "discriminator": "f7ede3f5d7c3de46",
+    "pubkeysCount": 20,
+    "u64ValuesCount": 14
+  }
+]

@@ -324,7 +324,7 @@ export class JupiterBot {
         {
           quoteResponse: quoteResponse.data,
           userPublicKey: this.keypair.publicKey.toBase58(),
-          wrapAndUnwrapSol: true,
+          wrapAndUnwrapSol: false, // ⚡ 闪电贷已处理SOL/wSOL转换，无需Jupiter重复处理（节省40-120字节）
         },
         { timeout: 10000 }
       );

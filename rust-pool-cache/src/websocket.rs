@@ -22,6 +22,7 @@ use crate::dex_interface::DexPool;
 use crate::error_tracker::ErrorTracker;
 use crate::metrics::MetricsCollector;
 use crate::pool_factory::PoolFactory;
+use crate::pool_stats::PoolStatsCollector; // 🔥 池子统计收集器
 use crate::price_cache::{PoolPrice, PriceCache};
 use crate::proxy;
 use crate::vault_reader::VaultReader;
@@ -38,6 +39,7 @@ pub enum SubscriptionRequest {
 pub struct WebSocketClient {
     url: String,
     metrics: Arc<MetricsCollector>,
+    pool_stats: Arc<PoolStatsCollector>, // 🔥 池子活跃度统计收集器
     proxy_config: Option<ProxyConfig>,
     price_cache: Arc<PriceCache>,
     error_tracker: Arc<ErrorTracker>,
@@ -65,6 +67,7 @@ impl WebSocketClient {
         Self {
             url,
             metrics,
+            pool_stats: Arc::new(PoolStatsCollector::new(price_change_threshold)), // 🔥 初始化池子统计收集器
             proxy_config,
             price_cache,
             error_tracker,
@@ -313,6 +316,10 @@ impl WebSocketClient {
             if id > 0 && (id as usize) <= pools.len() {
                 let pool_config = pools[(id - 1) as usize].clone();
                 self.subscription_map.lock().unwrap().insert(subscription_id, pool_config.clone());
+                
+                // 🔥 Record pool subscription stats
+                self.pool_stats.record_subscription(&pool_config.name, &pool_config.address);
+                
                 debug!("✅ Pool subscription confirmed: id={}, subscription_id={}, pool={}", 
                        id, subscription_id, pool_config.name);
             } else if id >= 10000 {
@@ -559,6 +566,7 @@ impl WebSocketClient {
         Self {
             url: self.url.clone(),
             metrics: self.metrics.clone(),
+            pool_stats: self.pool_stats.clone(), // 🔥 Clone pool stats collector
             proxy_config: self.proxy_config.clone(),
             price_cache: self.price_cache.clone(),
             error_tracker: self.error_tracker.clone(),
@@ -750,28 +758,31 @@ impl WebSocketClient {
                 // 🚨 Critical fix: Trigger price recalculation for related pools
                 // 一次性获取所有需要的数据（避免嵌套锁）
                 let configs_and_data: Vec<_> = {
-                    let subscription_map = self.subscription_map.lock().unwrap();
+                        let subscription_map = self.subscription_map.lock().unwrap();
                     let cache = self.pool_data_cache.lock().unwrap();
                     
                     pool_addresses.into_iter()
                         .filter_map(|pool_addr| {
                             let config = subscription_map.values()
-                                .find(|p| p.address == pool_addr)
+                            .find(|p| p.address == pool_addr)
                                 .cloned()?;
                             let data = cache.get(&pool_addr).cloned()?;
                             Some((config, data))
                         })
                         .collect()
-                };
-                
+                        };
+                        
                 // 安全处理（不持有任何锁）
                 for (config, data) in configs_and_data {
-                    info!(pool = %config.name, "Recalculating price after vault update");
+                            info!(pool = %config.name, "Recalculating price after vault update");
                     
-                    if let Ok(pool) = PoolFactory::create_pool(&config.pool_type, &data) {
+                    // 🔥 Record vault update stats
+                    self.pool_stats.record_vault_update(&config.name);
+                    
+                            if let Ok(pool) = PoolFactory::create_pool(&config.pool_type, &data) {
                         let slot = 0;
-                        let start_time = Instant::now();
-                        self.update_cache_from_pool(pool.as_ref(), &config, &config.name, slot, start_time);
+                                let start_time = Instant::now();
+                                self.update_cache_from_pool(pool.as_ref(), &config, &config.name, slot, start_time);
                     }
                 }
             }
@@ -826,13 +837,27 @@ impl WebSocketClient {
             0.0
         };
         
-        // 🚨 Critical fix: Skip updates with zero price (vault not ready yet)
-        if price == 0.0 {
-            debug!(pool = %pool_name, "Skipping pool with zero price (vault data not ready)");
-            return;
-        }
         let (base_decimals, quote_decimals) = pool.get_decimals();
         let dex_name = pool.dex_name();
+        
+        // 🚨 Critical fix: Handle zero price for vault-based pools
+        if price == 0.0 {
+            // 检查是否是vault-based池子（SolFi V2, GoonFi等）或CLMM池子
+            let is_vault_based = pool.get_vault_addresses().is_some();
+            let is_clmm = dex_name.contains("CLMM") || dex_name.contains("Concentrated");
+            
+            if is_vault_based || is_clmm {
+                // Vault池子或CLMM池子允许以price=0激活，等待后续数据
+                debug!(pool = %pool_name, dex = %dex_name, 
+                    "Pool with price=0 (vault-based={}, clmm={}), will update after data arrives", 
+                    is_vault_based, is_clmm);
+                // 不return，继续执行更新缓存逻辑
+            } else {
+                // 非vault/非CLMM池子的price=0是错误，跳过
+                debug!(pool = %pool_name, "Skipping non-vault pool with zero price");
+            return;
+        }
+        }
         
         // Calculate human-readable reserves
         let base_reserve_readable = base_reserve as f64 / 10f64.powi(base_decimals as i32);
@@ -840,6 +865,9 @@ impl WebSocketClient {
         
         // Record metrics
         self.metrics.record(pool_name.to_string(), latency_micros);
+        
+        // 🔥 Record pool stats - price update
+        self.pool_stats.record_price_update(pool_name, price);
         
         // Update price cache
         let pool_price = PoolPrice {
@@ -861,17 +889,25 @@ impl WebSocketClient {
         let should_log = {
             let price_changed = if let Some(entry) = self.last_prices.get(pool_name) {
                 let last_price = *entry.value();
-                let change_pct = ((price - last_price) / last_price * 100.0).abs();
                 
+                // 🚨 修复：如果last_price=0或price=0，特殊处理避免除以0
+                if last_price == 0.0 || price == 0.0 {
+                    // 从0更新到非0价格，或从非0到0，都视为显著变化
+                    last_price != price
+                } else {
+                    // 正常情况：计算价格变化百分比
+                let change_pct = ((price - last_price) / last_price * 100.0).abs();
+                    
                 if !change_pct.is_finite() {
                     warn!(pool = %pool_name, price, last_price, 
-                          "Invalid price change (NaN/Infinity)");
-                    return;
+                              "Invalid price change (NaN/Infinity)");
+                        return;
                 }
-                
+                    
                 change_pct >= self.price_change_threshold
+                }
             } else {
-                true
+                true  // 首次更新，总是记录
             };
             
             if price_changed {
@@ -900,6 +936,11 @@ impl WebSocketClient {
                 "Pool price updated (minor change)"
             );
         }
+    }
+    
+    /// 🔥 Get pool stats collector for external access
+    pub fn pool_stats(&self) -> Arc<PoolStatsCollector> {
+        Arc::clone(&self.pool_stats)
     }
 }
 

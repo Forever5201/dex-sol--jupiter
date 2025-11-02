@@ -123,18 +123,31 @@ pub struct MeteoraPoolState {
     
     /// Additional padding for future fields (align to 896 bytes after discriminator)
     /// 
-    /// 🔍 Empirical testing shows we need MORE padding than calculated
-    /// Calculated: 752 bytes of defined fields
-    /// Target: 896 bytes (904 - 8 discriminator)
+    /// 🔥 修正：根据实际测试，结构体定义太大了
+    /// 实际数据: 896 bytes
+    /// 已定义字段计算:
+    ///   - PoolParameters: 32
+    ///   - 13 Pubkeys: 13×32 = 416
+    ///   - i32 (active_id): 4
+    ///   - u16 (bin_step): 2
+    ///   - u8 (status): 1
+    ///   - u8 (_padding0): 1
+    ///   - 2 u64 (protocol_fee): 16
+    ///   - 2 u32 (fee rates): 8
+    ///   - u128 (liquidity): 16
+    ///   - 10 u64 (reward fields): 80
+    ///   - 2 u128 (reward cumulative): 32
+    ///   - 2 u32 (volatility): 8
+    ///   - i64 (timestamp): 8
+    ///   - 2 u64 (swap cap): 16
+    ///   - 3 Pubkey: 96
+    ///   - u8 (activation_type): 1
+    ///   - [u8;7] (_padding1): 7
+    ///   ━━━━━━━━━━━━━━━━━━━━━━
+    ///   总计: 744 bytes
     /// 
-    /// Trying larger padding to account for possible:
-    /// - Additional state fields in latest Meteora version
-    /// - Alignment padding inserted by Borsh
-    /// - Reserved fields for future use
-    /// 
-    /// Current approach: Use 200 bytes padding (conservative)
-    /// This leaves room for ~7 additional u64 fields or alignment
-    pub padding: [u8; 200],
+    /// 需要padding: 896 - 744 = 152 bytes
+    pub padding: [u8; 152],
 }
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -233,23 +246,13 @@ impl DexPool for MeteoraPoolState {
         
         let data_to_parse = &data[8..];
         
-        // 🚨 Temporary workaround: Skip this pool type until we get the exact structure
-        // The official Meteora SDK structure may have changed or have additional fields
-        // TODO: Query Meteora's official TypeScript SDK or on-chain program IDL
-        return Err(DexError::DeserializationFailed(format!(
-            "Meteora DLMM: Temporarily disabled - structure mismatch (data: {} bytes, need exact IDL)",
-            data_to_parse.len()
-        )));
-        
-        // Original deserialization code (commented out)
-        /*
+        // 🔥 尝试反序列化，如果失败则返回详细错误信息
         Self::try_from_slice(data_to_parse)
             .map_err(|e| DexError::DeserializationFailed(format!(
                 "Meteora DLMM: {} (data length: {} bytes, expected ~896 bytes after discriminator)",
                 e,
                 data_to_parse.len()
             )))
-        */
     }
     
     fn calculate_price(&self) -> f64 {

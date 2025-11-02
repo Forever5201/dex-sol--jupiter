@@ -57,7 +57,7 @@ signature_count = 4  # 闪电贷需要额外签名
 compute_units = 800_000  # 复杂交易需要更多计算单元
 compute_unit_price = 35_000  # 从20_000提升到35_000（配合动态最低保障）
 use_flash_loan = true
-flash_loan_amount = 100_000_000_000  # 默认借款 100 SOL
+flash_loan_amount = 50_000_000_000  # 默认借款 50 SOL（匹配Worker查询）
 
 [economics.profit]
 # 利润必须覆盖所有费用
@@ -89,8 +89,8 @@ provider = "jupiter-lend"  # ✅ 官方确认：Jupiter Lend 0%费用闪电贷�
 
 # Jupiter Lend 配置（0% 费用！）
 [flashloan.jupiter_lend]
-min_borrow_amount = 10_000_000_000  # 最小借款 10 SOL
-max_borrow_amount = 1_000_000_000_000  # 最大借款 1000 SOL
+min_borrow_amount = 50_000_000_000  # 最小借款 50 SOL（匹配Worker查询金额）
+max_borrow_amount = 50_000_000_000  # 最大借款 50 SOL（固定金额）
 fee_rate = 0.0  # 0% 费用！
 
 # Solend 配置（备用）
@@ -102,7 +102,7 @@ max_borrow_amount = 1_000_000_000_000  # 最大借款 1000 SOL
 fee_rate = 0.0009  # 0.09% 费率
 
 [flashloan.dynamic_sizing]
-enabled = true
+enabled = false  # 关闭动态借款，使用固定的50 SOL
 min_multiplier = 10  # 借款至少是预期利润的 10 倍
 max_multiplier = 100
 safety_margin = 1.5  # 安全边际
@@ -154,8 +154,12 @@ required_liquidity_multiplier = 2  # 流动性必须是借款的 2 倍
 mode = "jito"  # 闪电贷必须用 Jito 确保原子性
 max_concurrent_trades = 1  # 不并发执行
 
+# Jito Bundle配置（自动拆分大交易）
+auto_bundle_threshold = 1100  # 超过此字节数自动使用Bundle模式
+enable_bundle_mode = true     # 启用Bundle支持（突破1232字节限制）
+
 [jito]
-block_engine_url = "https://mainnet.block-engine.jito.wtf"
+block_engine_url = "mainnet.block-engine.jito.wtf"  # 修复：gRPC不需要https://前缀
 auth_keypair_path = "./keypairs/flashloan-wallet.json"
 check_jito_leader = true  # 必须启用！
 min_tip_lamports = 100_000
@@ -255,6 +259,22 @@ use_lut = true  # 必须使用 LUT 减少交易大小
 preload_common_accounts = true
 include_dex_accounts = true
 include_lending_accounts = true
+
+# ===================================================================
+# 交易大小优化配置
+# ===================================================================
+[transaction_optimization]
+# 路由复杂度策略（降级层级）
+# 第1层：最优路由，使用最多账户
+# 第2层：中等限制
+# 第3层：严格限制，仅使用直接路由
+max_accounts_tier_1 = 24  # 从28降低
+max_accounts_tier_2 = 20  # 从24降低
+max_accounts_tier_3 = 16  # 从20降低
+
+# 跳过cleanup指令以减小交易大小
+# 警告：跳过cleanup会导致每月约0.006 SOL的租金损失（未关闭的临时账户）
+skip_cleanup_instructions = false
 
 # ===================================================================
 # 预期表现

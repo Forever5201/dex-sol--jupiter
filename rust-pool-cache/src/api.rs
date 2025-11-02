@@ -12,6 +12,7 @@ use crate::arbitrage::{scan_for_arbitrage, ArbitrageOpportunity};
 use crate::error_tracker::ErrorTracker;
 use crate::price_cache::PriceCache;
 use crate::opportunity_validator::{OpportunityValidator, ValidationResult};
+use crate::lst_arbitrage::{LstArbitrageDetector, LstDiscountOpportunity};  // 🔥 LST套利
 
 use crate::onchain_simulator::OnChainSimulator;
 
@@ -316,6 +317,69 @@ async fn scan_validated(
     })
 }
 
+/// 🔥 GET /lst-opportunities - 扫描LST折价套利机会
+async fn scan_lst_opportunities(State(state): State<ApiState>) -> Json<LstOpportunitiesResponse> {
+    // 获取所有当前价格
+    let current_prices = state.price_cache.get_all_prices();
+    let mut price_map = std::collections::HashMap::new();
+    
+    for pool_price in current_prices {
+        price_map.insert(pool_price.pair, pool_price.price);
+    }
+    
+    // 创建LST检测器并扫描
+    let detector = LstArbitrageDetector::new(0.3); // 最小0.3%折价
+    
+    // 检测折价买入机会
+    let mut all_opportunities = detector.detect_discount_opportunities(&price_map);
+    
+    // 检测跨DEX套利机会
+    let cross_dex_opps = detector.detect_cross_dex_opportunities(&price_map);
+    all_opportunities.extend(cross_dex_opps);
+    
+    // 转换为DTO
+    let opportunities_dto: Vec<LstOpportunityDto> = all_opportunities
+        .into_iter()
+        .map(|opp| LstOpportunityDto {
+            lst_name: opp.lst_name,
+            market_price: opp.market_price,
+            fair_value: opp.fair_value,
+            discount_percent: opp.discount_percent,
+            estimated_profit_percent: opp.estimated_profit_percent,
+            pool_source: opp.pool_source,
+            arbitrage_type: format!("{:?}", opp.arbitrage_type),
+            recommended_amount_usd: opp.recommended_amount_usd,
+        })
+        .collect();
+    
+    let count = opportunities_dto.len();
+    
+    Json(LstOpportunitiesResponse {
+        opportunities: opportunities_dto,
+        count,
+        scan_time: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+#[derive(Serialize)]
+struct LstOpportunitiesResponse {
+    opportunities: Vec<LstOpportunityDto>,
+    count: usize,
+    scan_time: String,
+}
+
+#[derive(Serialize)]
+struct LstOpportunityDto {
+    lst_name: String,
+    market_price: f64,
+    fair_value: f64,
+    discount_percent: f64,
+    estimated_profit_percent: f64,
+    pool_source: String,
+    arbitrage_type: String,
+    recommended_amount_usd: f64,
+}
+
 /// Create the API router
 pub fn create_router(
     price_cache: Arc<PriceCache>, 
@@ -340,6 +404,7 @@ pub fn create_router(
         .route("/prices/:pair", get(get_pair_prices))
         .route("/scan-arbitrage", post(scan_arbitrage))
         .route("/scan-validated", post(scan_validated))  // 🎯 验证增强版扫描
+        .route("/lst-opportunities", get(scan_lst_opportunities))  // 🔥 LST折价机会
         .route("/errors", get(get_errors))
         .route("/data-quality", get(get_data_quality))
         .layer(cors)
@@ -363,6 +428,7 @@ pub async fn start_api_server(
     println!("     GET  /prices/:pair");
     println!("     POST /scan-arbitrage       (Legacy)");
     println!("     POST /scan-validated       🎯 Recommended: With validation");
+    println!("     GET  /lst-opportunities    🔥 LST discount arbitrage");
     println!("     GET  /errors");
     println!("     GET  /data-quality         📊 Data consistency stats");
     

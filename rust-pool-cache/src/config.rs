@@ -17,6 +17,8 @@ pub struct Config {
     pub simulation: Option<SimulationConfig>,  // 🎯 链上模拟配置
     #[serde(default)]
     pub initialization: Option<InitializationConfig>,  // 🚀 池子初始化配置
+    #[serde(default)]
+    pub lst_detector: Option<LstDetectorConfig>,  // 🔥 LST检测器配置
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,6 +290,73 @@ impl PoolType {
             PoolType::Unknown => "Unknown",
         }
     }
+}
+
+/// LST Detector configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LstDetectorConfig {
+    #[serde(default = "default_lst_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_min_discount")]
+    pub min_discount_percent: f64,
+    #[serde(default = "default_stake_pool_update_interval")]
+    pub stake_pool_update_interval: u64,
+    #[serde(default = "default_enable_triangle")]
+    pub enable_triangle_arbitrage: bool,
+    #[serde(default = "default_enable_multi_lst")]
+    pub enable_multi_lst_arbitrage: bool,
+    #[serde(default = "default_enable_redemption")]
+    pub enable_redemption_path: bool,
+    #[serde(default)]
+    pub marinade: Option<MarinadeConfig>,
+    #[serde(default)]
+    pub jito: Option<JitoConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarinadeConfig {
+    pub state_address: String,
+    #[serde(default = "default_marinade_unstake_fee")]
+    pub unstake_fee: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JitoConfig {
+    pub stake_pool_address: String,
+    #[serde(default = "default_jito_unstake_fee")]
+    pub unstake_fee: f64,
+}
+
+fn default_lst_enabled() -> bool {
+    true
+}
+
+fn default_min_discount() -> f64 {
+    0.3
+}
+
+fn default_stake_pool_update_interval() -> u64 {
+    300 // 5 minutes
+}
+
+fn default_enable_triangle() -> bool {
+    true
+}
+
+fn default_enable_multi_lst() -> bool {
+    true
+}
+
+fn default_enable_redemption() -> bool {
+    true
+}
+
+fn default_marinade_unstake_fee() -> f64 {
+    0.003
+}
+
+fn default_jito_unstake_fee() -> f64 {
+    0.001
 }
 
 impl Config {

@@ -28,6 +28,7 @@
     "@solana/web3.js": "^1.98.4",
     "axios": "^1.7.7",
     "https-proxy-agent": "^7.0.6",
+    "jito-ts": "^4.2.1",
     "p-queue": "^8.0.1",
     "pino": "^9.4.0",
     "toml": "^3.0.0",

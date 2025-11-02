@@ -7,6 +7,7 @@ mod deserializers;
 mod error_tracker;
 mod metrics;
 mod pool_factory;
+mod pool_stats;             // 🔥 池子活跃度统计模块
 mod price_cache;
 mod proxy;
 mod router;
@@ -18,6 +19,10 @@ mod vault_reader;
 mod opportunity_validator;  // 🎯 套利机会验证器
 mod onchain_simulator;      // 🎯 链上模拟器
 mod pool_initializer;       // 🚀 池子初始化器
+mod lst_arbitrage;          // 🔥 LST折价套利模块（旧版）
+mod stake_pool_reader;      // 🔥 Stake Pool实时数据读取（新增）
+mod lst_enhanced_detector;  // 🔥 LST增强检测器（新增）
+mod opportunity_merger;     // 🔥 机会合并与去重（新增）
 
 use anyhow::Result;
 use std::env;
@@ -34,6 +39,10 @@ use metrics::MetricsCollector;
 use price_cache::PriceCache;
 use router_advanced::{AdvancedRouter, AdvancedRouterConfig, RouterMode};
 use websocket::WebSocketClient;
+
+use crate::stake_pool_reader::StakePoolReader;
+use crate::lst_enhanced_detector::{LstEnhancedDetector, LstDetectorConfig};
+use crate::opportunity_merger::OpportunityMerger;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
@@ -228,6 +237,57 @@ async fn main() -> Result<()> {
     };
     println!();
     
+    // 🔥 Initialize StakePoolReader for LST Enhanced Detector
+    let stake_pool_reader = if let Some(lst_config) = &config.lst_detector {
+        if lst_config.enabled {
+            println!("🔥 Initializing Stake Pool Reader for LST detection...");
+            
+            // Get RPC URL from initialization config
+            let rpc_url = config.initialization
+                .as_ref()
+                .and_then(|init| init.rpc_urls.first())
+                .map(|s| s.as_str())
+                .unwrap_or("https://api.mainnet-beta.solana.com");
+            
+            println!("   RPC URL: {}", rpc_url);
+            println!("   Cache TTL: {}s", lst_config.stake_pool_update_interval);
+            
+            match StakePoolReader::new(rpc_url, lst_config.stake_pool_update_interval) {
+                Ok(reader) => {
+                    let reader: Arc<StakePoolReader> = Arc::new(reader);
+                    
+                    // Initial update to fetch theoretical rates
+                    match reader.update_cache() {
+                        Ok(_) => {
+                            let (msol_rate, jitosol_rate, _) = reader.get_cache_info();
+                            println!("   ✅ Stake pool cache initialized:");
+                            println!("      mSOL rate: {:.6}", msol_rate);
+                            println!("      jitoSOL rate: {:.6}", jitosol_rate);
+                        }
+                        Err(e) => {
+                            warn!("⚠️  Failed to initialize stake pool cache: {}", e);
+                            warn!("   Using default theoretical rates (mSOL: 1.05, jitoSOL: 1.04)");
+                        }
+                    }
+                    
+                    Some(reader)
+                }
+                Err(e) => {
+                    warn!("⚠️  Failed to create StakePoolReader: {}", e);
+                    warn!("   LST Enhanced Detector will be disabled");
+                    None
+                }
+            }
+        } else {
+            println!("ℹ️  LST Detector disabled in config\n");
+            None
+        }
+    } else {
+        println!("ℹ️  LST Detector not configured\n");
+        None
+    };
+    println!();
+    
     // ✅ FIX: Connect WebSocket in MAIN task (avoids spawn scheduling issue)
     println!("🔌 Establishing WebSocket connection in main task...");
     println!("   URL: {}", config.websocket_url());
@@ -267,6 +327,10 @@ async fn main() -> Result<()> {
         price_change_threshold,
         rpc_url_for_vault, // 🚀 传入RPC URL用于主动触发vault订阅
     );
+    
+    // 🔥 Get pool stats collector before moving ws_client
+    let pool_stats = ws_client.pool_stats();
+    let pool_stats_for_shutdown = pool_stats.clone(); // 🔥 Clone for shutdown handler
     
     // Spawn WebSocket processing task with the already-connected stream
     info!("Starting WebSocket message processing task...");
@@ -314,8 +378,33 @@ async fn main() -> Result<()> {
         // 🎯 Event-driven mode
         let event_config = config.router.as_ref().unwrap().event_driven.as_ref().unwrap().clone();
         
+        let stake_pool_reader_for_task = stake_pool_reader.clone();
+        
         tokio::spawn(async move {
             let advanced_router = AdvancedRouter::new(price_cache_clone.clone(), router_config.clone());
+            
+            // 🔥 创建LST增强检测器（新版）
+            let lst_detector = if let Some(reader) = stake_pool_reader_for_task {
+                let detector_config = LstDetectorConfig {
+                    min_discount_percent: 0.3,
+                    enable_triangle_arbitrage: true,
+                    enable_multi_lst_arbitrage: true,
+                    enable_redemption_path: true,
+                    marinade_unstake_fee: 0.003,
+                    jito_unstake_fee: 0.001,
+                };
+                
+                Some(LstEnhancedDetector::new(
+                    price_cache_clone.clone(),
+                    reader,
+                    detector_config,
+                ))
+            } else {
+                None
+            };
+            
+            // 创建机会合并器
+            let opportunity_merger = OpportunityMerger::new();
             
             println!("🎯 Event-Driven Router initialized:");
             println!("   Mode: {:?}", router_config.mode);
@@ -327,7 +416,19 @@ async fn main() -> Result<()> {
             println!("   Validation: {}", event_config.validation_strategy);
             println!("   Max concurrent: {}", event_config.max_concurrent_scans);
             println!("   Algorithms: Bellman-Ford + Dynamic Programming + Quick Scan");
-            println!("   Expected coverage: 100% opportunities, 100% profit\n");
+            println!("   Expected coverage: 100% opportunities, 100% profit");
+            
+            if lst_detector.is_some() {
+                println!("   🔥 LST Enhanced Detector: Enabled ⭐");
+                println!("      - Theoretical rate: Real-time from chain");
+                println!("      - Triangle arbitrage: Enabled (redemption path)");
+                println!("      - Multi-LST arbitrage: Enabled (mSOL vs jitoSOL)");
+                println!("      - Min discount: 0.3%");
+                println!("      - Detection: 4 strategies (cross-DEX + triangle + multi-LST + discount)");
+            } else {
+                println!("   ⚠️  LST Enhanced Detector: Disabled");
+            }
+            println!();
             
             let mut update_rx = price_cache_clone.subscribe_updates();
             let scan_semaphore = Arc::new(tokio::sync::Semaphore::new(event_config.max_concurrent_scans));
@@ -364,6 +465,29 @@ async fn main() -> Result<()> {
                         println!("   Scans triggered: {}", scan_count);
                         println!("   Status: Waiting for significant price changes (>{:.2}%)...\n", 
                             event_config.price_change_threshold_percent);
+                        
+                        // 🔥 Print pool activity summary
+                        pool_stats.print_per_minute_stats();
+                        pool_stats.print_summary(60);
+                        
+                        // 🔥 LST Enhanced Detector heartbeat
+                        if let Some(ref detector) = lst_detector {
+                            println!("\n🔥 LST Enhanced Detector Status:");
+                            
+                            // Display stake pool reader status (from the outer scope via stakepoolreader if available)
+                            // Note: We'll add this info in a different way
+                            
+                            // Run LST-specific scan (every 30 seconds)
+                            let lst_opps: Vec<lst_enhanced_detector::LstOpportunity> = detector.detect_all_opportunities(1000.0);
+                            
+                            if !lst_opps.is_empty() {
+                                let report = detector.generate_report(&lst_opps);
+                                println!("{}", report);
+                            } else {
+                                println!("   No LST opportunities found (threshold: 0.3%)\n");
+                            }
+                        }
+                        
                         continue;
                     }
                 };
@@ -413,6 +537,9 @@ async fn main() -> Result<()> {
                     let db_clone = db_manager_clone.clone();
                     let router_cfg = router_config.clone();
                     let validation = event_config.validation_strategy.clone();
+                    let lst_detector_clone = lst_detector.clone();
+                    let merger_clone = opportunity_merger.clone();
+                    let is_lst_event = event.pair.contains("mSOL") || event.pair.contains("jitoSOL");
                     
                     // Spawn scan task
                     tokio::spawn(async move {
@@ -425,15 +552,64 @@ async fn main() -> Result<()> {
                         println!("   Initial amount: ${}", initial_amount);
                         println!("   Min ROI: {}%", router_cfg.min_roi_percent);
                         println!("   Router mode: {:?}", router_cfg.mode);
+                        if is_lst_event {
+                            println!("   🔥 LST-related event: Enhanced detection enabled");
+                        }
                         
+                        // 1. Run general router scan
                         let all_paths = router_clone.find_optimal_routes(initial_amount).await;
+                        
+                        // 2. Run LST-specific scan (if enabled and LST-related event or periodic)
+                        let lst_opps: Vec<lst_enhanced_detector::LstOpportunity> = if let Some(ref detector) = lst_detector_clone {
+                            if is_lst_event || scan_count % 6 == 0 {
+                                println!("   🔥 Running LST-specific detection...");
+                                detector.detect_all_opportunities(initial_amount)
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            Vec::new()
+                        };
+                        
                         let scan_duration = scan_start.elapsed();
                         
                         println!("⏱️  Scan completed in {:?}", scan_duration);
-                        println!("📊 Result: {} opportunities found", all_paths.len());
+                        println!("📊 Result: {} general + {} LST opportunities", 
+                                 all_paths.len(), lst_opps.len());
+                        
+                        // 3. Merge and deduplicate results
+                        let total_opportunities = all_paths.len() + lst_opps.len();
+                        
+                        if total_opportunities > 0 {
+                            println!("\n🔥 Merging and deduplicating {} total opportunities...", total_opportunities);
+                            
+                            // Convert OptimizedPath to ArbitragePath for merging
+                            let general_arbitrage_paths: Vec<_> = all_paths.iter()
+                                .map(|opt_path| opt_path.base_path.clone())
+                                .collect();
+                            
+                            // Convert LstOpportunity to ArbitragePath (filter out None values)
+                            let lst_arbitrage_paths: Vec<_> = lst_opps.iter()
+                                .filter_map(|opp| opp.to_arbitrage_path())
+                                .collect();
+                            
+                            // Merge results
+                            let merged_opportunities = merger_clone.merge(
+                                general_arbitrage_paths,
+                                lst_opps,
+                            );
+                            
+                            println!("📊 After deduplication: {} unique opportunities\n", merged_opportunities.len());
+                            
+                            // Display merged report
+                            if !merged_opportunities.is_empty() {
+                                let report = merger_clone.format_report(&merged_opportunities);
+                                println!("{}", report);
+                            }
+                        }
                         
                         if !all_paths.is_empty() {
-                            println!("\n🔥 Found {} arbitrage opportunities (event-driven):\n", all_paths.len());
+                            println!("\n📋 Detailed opportunity breakdown:\n");
                             
                             // Record to database
                             if let Some(ref db) = db_clone {
@@ -622,6 +798,11 @@ async fn main() -> Result<()> {
             // Print final statistics
             println!("\n📊 Final Statistics:");
             metrics.print_stats(60);
+            
+            // 🔥 Print detailed pool activity statistics
+            println!("\n🔥 Pool Activity Statistics:");
+            pool_stats_for_shutdown.print_summary(3600); // Last hour
+            pool_stats_for_shutdown.print_detailed_stats(20, 3600); // Top 20 pools
             
             // Print cache stats
             let (pools, pairs) = price_cache.get_stats();

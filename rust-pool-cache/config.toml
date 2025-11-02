@@ -684,3 +684,35 @@ pool_type = "goonfi"
 # GoonFi池子已在上方第312行配置
 # 最后更新：2025-10-30
 
+# ============================================
+# LST检测器配置
+# ============================================
+[lst_detector]
+# 是否启用LST专用检测器
+enabled = true
+
+# 最小折价阈值（百分比）
+min_discount_percent = 0.3
+
+# Stake Pool更新间隔（秒）- 实时从链上读取theoretical_rate
+stake_pool_update_interval = 300  # 5分钟
+
+# 是否启用三角套利检测（考虑赎回路径）
+enable_triangle_arbitrage = true
+
+# 是否启用多LST套利检测（mSOL vs jitoSOL）
+enable_multi_lst_arbitrage = true
+
+# 是否考虑赎回路径（需要等待解锁期）
+enable_redemption_path = true
+
+# Marinade配置
+[lst_detector.marinade]
+state_address = "8szGkuLTAux9XMgZ2vtY39jVSowEcpBfFfD8hXSEqdGC"
+unstake_fee = 0.003  # 0.3%
+
+# Jito配置
+[lst_detector.jito]
+stake_pool_address = "Jito4APyf642JPZPx3hGc6WWJ8zPKtRbRs4P815Awbb"
+unstake_fee = 0.001  # 0.1%
+

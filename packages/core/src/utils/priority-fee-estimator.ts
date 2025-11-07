@@ -47,6 +47,10 @@ export class PriorityFeeEstimator {
   private readonly MIN_FEE_PER_CU = 20_000;      // 20k micro-lamports (最低保障)
   private readonly MAX_FEE_PER_CU = 100_000;     // 100k micro-lamports (防止极端情况)
   private readonly MAX_FEE_PROFIT_RATIO = 0.10;  // 优先费不超过利润的10%
+  
+  // 🚀 优化：优先费缓存（30秒TTL）
+  private feeCache: { estimate: PriorityFeeEstimate; timestamp: number } | null = null;
+  private readonly CACHE_TTL = 30000;  // 30秒过期
 
   constructor(
     private connection: Connection,
@@ -65,6 +69,16 @@ export class PriorityFeeEstimator {
     urgency: Urgency = 'high'
   ): Promise<PriorityFeeEstimate> {
     try {
+      // 🚀 优化：检查缓存（10秒内复用）
+      const now = Date.now();
+      if (this.feeCache && (now - this.feeCache.timestamp) < this.CACHE_TTL) {
+        logger.debug(
+          `💨 优先费缓存命中 (age=${now - this.feeCache.timestamp}ms): ` +
+          `${this.feeCache.estimate.feePerCU} μL/CU, ${this.feeCache.estimate.totalFee} lamports`
+        );
+        return this.feeCache.estimate;
+      }
+      
       // 1. 查询网络费用（基于DEX账户争用）
       const networkFee = await this.queryNetworkFee(urgency);
       
@@ -85,12 +99,20 @@ export class PriorityFeeEstimator {
       
       logger.debug(`优先费估算完成: ${finalFeePerCU} micro-lamports/CU, 总计 ${totalFee} lamports`);
       
-      return {
+      const estimate: PriorityFeeEstimate = {
         feePerCU: finalFeePerCU,
         totalFee,
         computeUnits: this.computeUnits,
         strategy,
       };
+      
+      // 🚀 优化：更新缓存
+      this.feeCache = {
+        estimate,
+        timestamp: Date.now(),
+      };
+      
+      return estimate;
     } catch (error: any) {
       logger.warn(`优先费估算失败，使用降级策略: ${error.message}`);
       return this.getFallbackFee(profit);

@@ -282,6 +282,7 @@ export class SolendAdapter {
     fees: FlashLoanFeeConfig
   ): FlashLoanValidationResult {
     // Solend 闪电贷费用（0.09%）
+    const enableNetProfitCheck = fees.enableNetProfitCheck ?? true;
     const flashLoanFee = this.calculateFee(borrowAmount);
     
     // ===== 第一阶段：扣除固定成本（无论成败都会扣除） =====
@@ -322,7 +323,8 @@ export class SolendAdapter {
     
     const netProfit = grossProfit - jitoTip - slippageBuffer;
 
-    if (netProfit <= 0) {
+    // ===== 第三阶段：净利润检查（可配置关闭） =====
+    if (enableNetProfitCheck && netProfit <= 0) {
       return {
         valid: false,
         fee: flashLoanFee,

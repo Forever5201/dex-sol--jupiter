@@ -96,6 +96,8 @@ export interface FlashLoanFeeConfig {
   jitoTipPercent: number;
   /** 滑点缓冲 (基点, 例如: 15 表示 0.15%) */
   slippageBufferBps: number;
+  /** 是否启用净利润检查（默认 true） */
+  enableNetProfitCheck?: boolean;
 }
 
 /**

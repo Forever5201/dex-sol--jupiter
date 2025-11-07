@@ -21,9 +21,9 @@ const shouldUseLocalApi = (value?: string | null): boolean => {
 const USE_LOCAL_API = shouldUseLocalApi(process.env.USE_LOCAL_JUPITER_API);
 const JUPITER_API_URL = USE_LOCAL_API 
   ? (process.env.JUPITER_LOCAL_API || 'http://localhost:8080')
-  : 'https://api.jup.ag/ultra';  // 🔥 Ultra API (需要 API Key)
+  : 'https://lite-api.jup.ag/swap/v1';  // 🔥 Legacy Swap API (Metis v1引擎)
 
-const API_ENDPOINT = USE_LOCAL_API ? '/quote' : '/v1/quote';  // 🔥 Ultra API 使用 /v1/quote
+const API_ENDPOINT = '/quote';  // 🔥 Legacy Swap API统一使用 /quote
 
 interface WorkerConfig {
   workerId: number;
@@ -77,12 +77,12 @@ const BRIDGE_TOKENS = config.bridges;
 console.log(`Worker ${workerId} assigned ${BRIDGE_TOKENS.length} bridge tokens from main thread`);
 
 /**
- * 预热连接池（使用Pro Ultra API）
+ * 预热连接池（使用Legacy Swap API）
  * 
- * 🎯 Pro Ultra API：
- * - ✅ api.jup.ag/ultra: 官方Pro版本
- * - ✅ 使用GET方法 + API Key
- * - ✅ iris/Metis v2 + JupiterZ RFQ路由引擎
+ * 🎯 Legacy Swap API：
+ * - ✅ lite-api.jup.ag/swap/v1: 官方Lite版本
+ * - ✅ 使用GET方法，API Key可选
+ * - ✅ Metis v1路由引擎（聚合所有DEX）
  * 
  * 🔥 优化策略：建立10个热连接，避免首次查询TLS握手延迟
  */
@@ -92,11 +92,6 @@ async function warmupConnections(): Promise<void> {
     
     if (!proxyUrl) {
       console.log(`[Worker ${workerId}] ⚠️ No proxy configured, skipping warmup`);
-      return;
-    }
-    
-    if (!config.apiKey) {
-      console.log(`[Worker ${workerId}] ⚠️ No API Key configured, skipping warmup`);
       return;
     }
     
@@ -122,7 +117,8 @@ async function warmupConnections(): Promise<void> {
           `${JUPITER_API_URL}${API_ENDPOINT}` +
           '?inputMint=So11111111111111111111111111111111111111112' +
           '&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' +
-          '&amount=1000000000',  // 🔥 使用1 SOL（降低API负载）
+          '&amount=1000000000' +  // 🔥 使用1 SOL（降低API负载）
+          '&slippageBps=50',  // 🔥 Legacy API需要slippageBps参数
           {
             httpsAgent: agent,
             httpAgent: agent,
@@ -131,7 +127,7 @@ async function warmupConnections(): Promise<void> {
             headers: {
               'Connection': 'keep-alive',
               'Accept-Encoding': 'br, gzip, deflate',
-              'X-API-Key': config.apiKey,
+              // 🔥 Legacy API不需要X-API-Key
             },
           }
         );
@@ -306,11 +302,12 @@ async function queryBridgeArbitrage(
       console.log(`[Worker ${workerId}] 🚀 First parallel query starting...`);
       console.log(`   API: ${JUPITER_API_URL}${API_ENDPOINT} ${USE_LOCAL_API ? '(🟢 LOCAL API)' : '(🔴 REMOTE API)'}`);
       console.log(`   Mode: ${USE_LOCAL_API ? 'Local (< 5ms latency)' : 'Remote (~500ms latency)'}`);
-      console.log(`   API Key: ${config.apiKey ? 'Configured (...' + config.apiKey.slice(-8) + ')' : '⚠️ MISSING (Ultra API requires key!)'}`);
+      console.log(`   API Key: ${config.apiKey ? 'Configured (...' + config.apiKey.slice(-8) + ')' : 'Not required (Legacy API)'}`);
       console.log(`   Amount: ${config.amount} lamports (${inputAmountDisplay.toFixed(2)} ${inputTokenInfo.symbol})`);
       console.log(`   Path: ${inputMint.slice(0, 8)}... (${inputTokenInfo.symbol}) → ${bridgeToken.symbol}`);
-      console.log(`   Routing: ${USE_LOCAL_API ? 'Local Jupiter Router (All DEXes)' : 'Ultra API Beta - iris/Metis v2 + JupiterZ RFQ'}`);
-      console.log(`   Rate Limit: Dynamic (5 RPS base, auto-scaling with volume)`);
+      console.log(`   Routing: ${USE_LOCAL_API ? 'Local Jupiter Router (All DEXes)' : 'Legacy Swap API - Metis v1 (All DEXes)'}`);
+      console.log(`   Slippage: ${config.slippageBps}bps (0.5%)`);
+      console.log(`   Rate Limit: Standard (requests are rate-limited per user)`);
       console.log(`   🔥 Smart Parallel Query: Estimate + Unit Price Method`);
     }
 
@@ -330,17 +327,19 @@ async function queryBridgeArbitrage(
     // 估算去程输出（USDC金额）
     const estimatedBridgeAmount = Math.floor((config.amount / 1e9) * historicalRatio * 1e6);  // 转换为USDC的最小单位
     
-    // 构建查询参数（不传 taker，Ultra API 只用于价格发现）
+    // 构建查询参数（Legacy Swap API需要slippageBps）
     const paramsOut = new URLSearchParams({
       inputMint,
       outputMint: bridgeToken.mint,
       amount: config.amount.toString(),
+      slippageBps: config.slippageBps.toString(),  // 🔥 Legacy API必需参数
     });
     
     const paramsBack = new URLSearchParams({
       inputMint: bridgeToken.mint,
       outputMint: inputMint,
       amount: estimatedBridgeAmount.toString(),  // 使用估算值
+      slippageBps: config.slippageBps.toString(),  // 🔥 Legacy API必需参数
     });
 
     // === 🔥 并行查询（关键优化）===
@@ -356,13 +355,7 @@ async function queryBridgeArbitrage(
         outboundStartTime = Date.now();
         const response = await axios.get(
           `${JUPITER_API_URL}${API_ENDPOINT}?${paramsOut}`,
-          {
-            ...axiosConfig,
-            headers: {
-              ...axiosConfig.headers,
-              'X-API-Key': config.apiKey || '',
-            }
-          }
+          axiosConfig  // 🔥 Legacy API不需要X-API-Key头
         );
         outboundEndTime = Date.now();
         return response;
@@ -372,13 +365,7 @@ async function queryBridgeArbitrage(
         returnStartTime = Date.now();
         const response = await axios.get(
           `${JUPITER_API_URL}${API_ENDPOINT}?${paramsBack}`,
-          {
-            ...axiosConfig,
-            headers: {
-              ...axiosConfig.headers,
-              'X-API-Key': config.apiKey || '',
-            }
-          }
+          axiosConfig  // 🔥 Legacy API不需要X-API-Key头
         );
         returnEndTime = Date.now();
         return response;

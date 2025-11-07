@@ -61,6 +61,17 @@ min_roi = 200  # 200% ROI（基于费用，不是本金）
 max_slippage = 0.015  # 1.5% 最大滑点
 min_liquidity_usd = 100000  # 只选择大池子（$100k+流动性）
 
+# ⚠️ 净利润检查开关（高级功能，谨慎使用）
+# true: 执行前检查净利润是否为正（扣除所有费用后）
+# false: 跳过净利润检查，只要毛利润 > 阈值就执行
+# 警告：关闭后可能执行亏损交易，建议阈值远大于总成本（建议 > 0.015 SOL）
+# 
+# ⚠️⚠️⚠️ 已关闭最终净利润验证 ⚠️⚠️⚠️
+# 系统将跳过"路径2-构建交易"中的第④步净利润检查
+# 只要毛利润覆盖固定成本（签名费+优先费）就会执行
+# 失败会损失: 0.00005-0.0001 SOL/次
+enable_net_profit_check = false
+
 [economics.risk]
 # 风险控制 - 闪电贷失败成本高，需要更保守
 max_consecutive_failures = 3  # 连续失败 3 次暂停
@@ -146,14 +157,17 @@ mints_file = "mints-simple.txt"  # 初始代币列表
 #   Worker 2 → mSOL (质押衍生品)
 #   Worker 3 → jitoSOL (Jito生态)
 #
-# 速率计算：
-#   4 Workers × (60÷3秒) × 2查询 = 160次/分钟 ≈ 27次/10秒
-#   Ultra API限制: 50次/10秒（基础配额）
-#   利用率: 27÷50 = 54% ✅ 安全范围（40-60%）
-#   安全余量: 46%（容忍网络抖动和重试）
+# 速率计算（Legacy API Lite限速）：
+#   🔥 Legacy API Lite限速：60 requests per 60 seconds (1 RPS)
+#   安全配置：1 worker × 2 queries / 2s = 1 RPS = 60 requests/60s
+#   符合Lite限速，安全余量: 0%（刚好达到限速）
+#   
+#   如需提速，请升级到Pro API (10-500 RPS):
+#   - Pro I: 10 RPS = ~$49/月
+#   - Pro II: 50 RPS = ~$99/月
 # ============================================================
-worker_count = 2  # 仅启用两个 Worker，对应 USDC、USDT
-query_interval_ms = 1500  # 🔥 优化：1.5秒间隔，修复burst后可安全提速（40 req/10s，80%利用率）
+worker_count = 1  # 🔥 使用1个Worker（Lite限速）
+query_interval_ms = 2000  # 🔥 2秒间隔（1 RPS，符合Lite限速）
 min_profit_lamports = 500_000  # 0.0005 SOL（生产阈值）
 slippage_bps = 50  # 0.5% 滑点
 

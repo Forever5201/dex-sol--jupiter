@@ -11,7 +11,7 @@
 [bot]
 name = "flashloan-arbitrage-bot"
 network = "mainnet-beta"
-dry_run = false  # 设置为 true 可以先模拟运行
+dry_run = true  # ✅ 模拟运行模式（不需要 Jito 授权）
 
 # ===================================================================
 # 验证配置
@@ -133,8 +133,8 @@ only_direct_routes = false
 # ===================================================================
 [opportunity_finder]
 mints_file = "./mints-high-liquidity.txt"  # 大流动性代币列表
-worker_count = 3  # 从4降至3（优化API限速）
-query_interval_ms = 80  # 从10改为80ms（3 × 12.5 QPS = 37.5 QPS，符合Ultra API扩展限制）
+worker_count = 1  # 🔥 Legacy API Lite限速：1 RPS，使用1个Worker
+query_interval_ms = 2000  # 🔥 2秒间隔 = 0.5 RPS (1 Worker × 2 requests / 2s = 1 RPS，符合Lite限速)
 min_profit_lamports = 5_000_000  # 必须覆盖闪电贷费用
 slippage_bps = 100  # 1% 滑点（增加以允许更简单路由）
 max_bridge_tokens = 1  # 限制为1，减少交易复杂度
@@ -148,24 +148,36 @@ min_gross_profit_multiplier = 3  # 毛利润必须是费用的 3 倍
 required_liquidity_multiplier = 2  # 流动性必须是借款的 2 倍
 
 # ===================================================================
-# 执行器配置 - 使用 Jito MEV
+# 执行器配置
 # ===================================================================
 [execution]
-mode = "jito"  # 闪电贷必须用 Jito 确保原子性
 max_concurrent_trades = 1  # 不并发执行
 
 # Jito Bundle配置（自动拆分大交易）
-auto_bundle_threshold = 1100  # 超过此字节数自动使用Bundle模式
+auto_bundle_threshold = 1630  # ✅ 优化：提高到1630（ATA优化后，最大交易1595B，安全余量49B）
 enable_bundle_mode = true     # 启用Bundle支持（突破1232字节限制）
+# 说明：创建USDC+USDT ATA后，交易大小降至1492-1600B
+# 安全计算：1595B（最大观察值）+ 35B（余量）= 1630B < 1644B（限制）✅
 
 [jito]
-block_engine_url = "mainnet.block-engine.jito.wtf"  # 修复：gRPC不需要https://前缀
+# ⚠️ Jito 未授权，但保留配置以防止程序崩溃
+# 实际执行时会使用 dry_run 模式或 RPC fallback
+block_engine_url = "mainnet.block-engine.jito.wtf"
 auth_keypair_path = "./keypairs/flashloan-wallet.json"
-check_jito_leader = true  # 必须启用！
+check_jito_leader = false  # ❌ 禁用 Leader 检查（未授权）
 min_tip_lamports = 100_000
 max_tip_lamports = 100_000_000
 tip_strategy = "balanced"
 confirmation_timeout = 45000  # 45秒（闪电贷交易更复杂）
+
+# 💡 说明：
+# - 当前钱包未被 Jito 授权，交易会失败
+# - 建议先用 dry_run = true 模拟运行
+# - 或申请 Jito 授权：
+#   1. 访问 https://www.jito.wtf/ 注册
+#   2. 将钱包添加到白名单: 8mMVqLDsCsHYFZWvfEs7GhW9w7RH6J4rRxamLRgpwDDc
+#   3. 等待审核（1-3个工作日）
+#   4. 将 check_jito_leader 改为 true
 
 # ===================================================================
 # 数据库配置（可选功能）
@@ -273,8 +285,9 @@ max_accounts_tier_2 = 20  # 从24降低
 max_accounts_tier_3 = 16  # 从20降低
 
 # 跳过cleanup指令以减小交易大小
-# 警告：跳过cleanup会导致每月约0.006 SOL的租金损失（未关闭的临时账户）
-skip_cleanup_instructions = false
+# ⚠️ 警告：跳过cleanup会导致每笔约0.002 SOL的租金损失（未关闭的临时账户）
+# 实际成本：如果每天20笔 = 0.04 SOL/天 = 1.2 SOL/月，不建议跳过
+skip_cleanup_instructions = false  # ✅ 保留cleanup，避免租金损失
 
 # ===================================================================
 # 预期表现

@@ -262,10 +262,24 @@ impl Router {
         // 路径：quote → base (买入) → quote (卖出)
         // 例如：USDC → SOL → USDC
         
+        // 🔥 使用精确AMM公式计算
+        use crate::dex_interface::amm_calculator;
+        
         // 步骤1：在低价池买入 base_token
         let fee1 = self.get_dex_fee(&buy_pool.dex_name);
-        let after_fee1 = initial_amount * (1.0 - fee1);
-        let base_amount = after_fee1 / buy_pool.price;
+        
+        // 转换储备量为浮点数
+        let (base_decimals, quote_decimals) = buy_pool.get_decimals();
+        let buy_base_reserve = buy_pool.base_reserve as f64 / 10f64.powi(base_decimals as i32);
+        let buy_quote_reserve = buy_pool.quote_reserve as f64 / 10f64.powi(quote_decimals as i32);
+        
+        // 使用AMM公式：quote → base
+        let base_amount = amm_calculator::calculate_amm_output_f64(
+            initial_amount,
+            buy_quote_reserve,  // reserve_in (USDC)
+            buy_base_reserve,   // reserve_out (SOL)
+            fee1,
+        );
         
         let step1 = RouteStep {
             pool_id: buy_pool.pool_id.clone(),
@@ -281,8 +295,19 @@ impl Router {
         
         // 步骤2：在高价池卖出 base_token
         let fee2 = self.get_dex_fee(&sell_pool.dex_name);
-        let quote_amount = base_amount * sell_pool.price;
-        let final_amount = quote_amount * (1.0 - fee2);
+        
+        // 转换储备量为浮点数
+        let (sell_base_decimals, sell_quote_decimals) = sell_pool.get_decimals();
+        let sell_base_reserve = sell_pool.base_reserve as f64 / 10f64.powi(sell_base_decimals as i32);
+        let sell_quote_reserve = sell_pool.quote_reserve as f64 / 10f64.powi(sell_quote_decimals as i32);
+        
+        // 使用AMM公式：base → quote
+        let final_amount = amm_calculator::calculate_amm_output_f64(
+            base_amount,
+            sell_base_reserve,  // reserve_in (SOL)
+            sell_quote_reserve, // reserve_out (USDC)
+            fee2,
+        );
         
         let step2 = RouteStep {
             pool_id: sell_pool.pool_id.clone(),
@@ -346,6 +371,9 @@ impl Router {
     }
     
     /// 构建代币图（代币之间的连接关系）
+    /// 
+    /// 🔥 优化：保留同一交易对的所有池子，不去重
+    /// 这样可以在三角套利中尝试所有可能的池子组合，避免遗漏5-10%的机会
     fn build_token_graph(&self) -> HashMap<String, Vec<(String, PoolPrice)>> {
         let mut graph: HashMap<String, Vec<(String, PoolPrice)>> = HashMap::new();
         let all_prices = self.price_cache.get_all_prices();
@@ -359,12 +387,14 @@ impl Router {
             let base = tokens[0].to_string();
             let quote = tokens[1].to_string();
             
-            // 添加正向边：quote → base
+            // 🔥 添加正向边：quote → base
+            // 每个池子都单独添加，即使同一交易对有多个池子
             graph.entry(quote.clone())
                 .or_insert_with(Vec::new)
                 .push((base.clone(), pool.clone()));
             
-            // 添加反向边：base → quote
+            // 🔥 添加反向边：base → quote
+            // 同样保留所有池子
             let mut reverse_pool = pool.clone();
             reverse_pool.price = 1.0 / pool.price;
             graph.entry(base)
@@ -447,10 +477,21 @@ impl Router {
         pool_ca: &PoolPrice,
         initial_amount: f64,
     ) -> Option<ArbitragePath> {
+        // 🔥 使用精确AMM公式计算三角套利
+        use crate::dex_interface::amm_calculator;
+        
         // 步骤1：A → B
         let fee1 = self.get_dex_fee(&pool_ab.dex_name);
-        let amount_after_fee1 = initial_amount * (1.0 - fee1);
-        let amount_b = amount_after_fee1 / pool_ab.price;
+        let (reserve_in_ab, reserve_out_ab) = self.get_directional_reserves_for_pair(
+            pool_ab, token_a, token_b
+        );
+        
+        let amount_b = amm_calculator::calculate_amm_output_f64(
+            initial_amount,
+            reserve_in_ab,
+            reserve_out_ab,
+            fee1,
+        );
         
         let step1 = RouteStep {
             pool_id: pool_ab.pool_id.clone(),
@@ -466,8 +507,16 @@ impl Router {
         
         // 步骤2：B → C
         let fee2 = self.get_dex_fee(&pool_bc.dex_name);
-        let amount_after_fee2 = amount_b * (1.0 - fee2);
-        let amount_c = amount_after_fee2 / pool_bc.price;
+        let (reserve_in_bc, reserve_out_bc) = self.get_directional_reserves_for_pair(
+            pool_bc, token_b, token_c
+        );
+        
+        let amount_c = amm_calculator::calculate_amm_output_f64(
+            amount_b,
+            reserve_in_bc,
+            reserve_out_bc,
+            fee2,
+        );
         
         let step2 = RouteStep {
             pool_id: pool_bc.pool_id.clone(),
@@ -483,8 +532,16 @@ impl Router {
         
         // 步骤3：C → A
         let fee3 = self.get_dex_fee(&pool_ca.dex_name);
-        let amount_after_fee3 = amount_c * (1.0 - fee3);
-        let final_amount = amount_after_fee3 / pool_ca.price;
+        let (reserve_in_ca, reserve_out_ca) = self.get_directional_reserves_for_pair(
+            pool_ca, token_c, token_a
+        );
+        
+        let final_amount = amm_calculator::calculate_amm_output_f64(
+            amount_c,
+            reserve_in_ca,
+            reserve_out_ca,
+            fee3,
+        );
         
         let step3 = RouteStep {
             pool_id: pool_ca.pool_id.clone(),
@@ -528,6 +585,44 @@ impl Router {
     /// 获取DEX的手续费率
     fn get_dex_fee(&self, dex_name: &str) -> f64 {
         *self.dex_fees.get(dex_name).unwrap_or(&0.003) // 默认0.3%
+    }
+    
+    /// 获取交易方向的储备量
+    /// 
+    /// 根据交易方向（from_token → to_token），正确提取输入和输出储备量
+    fn get_directional_reserves_for_pair(
+        &self,
+        pool: &PoolPrice,
+        from_token: &str,
+        to_token: &str,
+    ) -> (f64, f64) {
+        let (base_reserve, quote_reserve) = pool.get_reserves();
+        let (base_decimals, quote_decimals) = pool.get_decimals();
+        
+        // 转换为浮点数
+        let base_reserve_f64 = base_reserve as f64 / 10f64.powi(base_decimals as i32);
+        let quote_reserve_f64 = quote_reserve as f64 / 10f64.powi(quote_decimals as i32);
+        
+        // 解析交易对
+        let pair_tokens: Vec<&str> = pool.pair.split('/').collect();
+        if pair_tokens.len() != 2 {
+            return (base_reserve_f64, quote_reserve_f64);
+        }
+        
+        let base_token = pair_tokens[0];
+        let quote_token = pair_tokens[1];
+        
+        // 确定交易方向
+        if from_token == quote_token && to_token == base_token {
+            // quote → base (买入base)
+            (quote_reserve_f64, base_reserve_f64)
+        } else if from_token == base_token && to_token == quote_token {
+            // base → quote (卖出base)
+            (base_reserve_f64, quote_reserve_f64)
+        } else {
+            // 降级处理：无法确定方向，使用默认
+            (base_reserve_f64, quote_reserve_f64)
+        }
     }
     
     /// 🎯 选择最优路径

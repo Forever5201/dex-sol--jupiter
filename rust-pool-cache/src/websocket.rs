@@ -592,11 +592,14 @@ impl WebSocketClient {
     ) -> Result<()> {
         info!("🚀 Proactively fetching pool states to trigger vault subscriptions...");
         
-        // 收集所有需要查询的池子（Phoenix和SolFi）
+        // 收集所有需要查询的池子（Phoenix、SolFi、Raydium CLMM、Orca Whirlpool）
         let target_pools: Vec<_> = pools.iter()
             .filter(|pool| {
                 let pool_type_lower = pool.pool_type.to_lowercase();
-                pool_type_lower.contains("phoenix") || pool_type_lower.contains("solfi")
+                pool_type_lower.contains("phoenix") 
+                    || pool_type_lower.contains("solfi")
+                    || pool_type_lower.contains("clmm")
+                    || pool_type_lower.contains("whirlpool")
             })
             .collect();
         
@@ -694,8 +697,18 @@ impl WebSocketClient {
                                 vault_triggered_count += 1;
                             }
                         } else {
-                            info!("✓ Vaults already registered for {}, skipping", pool_name);
+                            info!("✓ Vaults already registered for {}, fetching initial balances...", pool_name);
                         }
+                        
+                        // 🔥 关键修复：无论vault是否已注册，都查询初始余额
+                        // 这确保即使vault在RPC阶段已注册，也能获得初始数据
+                        self.fetch_and_update_vault_balances(
+                            &rpc_client,
+                            &vault_a,
+                            &vault_b,
+                            &pool_address,
+                            &pool_name
+                        ).await;
                     }
                 }
                 Err(e) => {
@@ -708,6 +721,114 @@ impl WebSocketClient {
               fetched_count, vault_triggered_count);
         
         Ok(())
+    }
+    
+    /// 🔥 新增：批量查询vault余额并更新
+    async fn fetch_and_update_vault_balances(
+        &self,
+        rpc_client: &Arc<RpcClient>,
+        vault_a: &Pubkey,
+        vault_b: &Pubkey,
+        pool_address: &str,
+        pool_name: &str,
+    ) {
+        // 并行查询两个vault
+        let rpc_a = rpc_client.clone();
+        let rpc_b = rpc_client.clone();
+        let vault_a_clone = *vault_a;
+        let vault_b_clone = *vault_b;
+        
+        info!("🔍 Fetching vault balances for {} via RPC...", pool_name);
+        
+        let (result_a, result_b) = tokio::join!(
+            tokio::task::spawn_blocking(move || rpc_a.get_account(&vault_a_clone)),
+            tokio::task::spawn_blocking(move || rpc_b.get_account(&vault_b_clone))
+        );
+        
+        // 处理vault A
+        match result_a {
+            Ok(Ok(account_a)) => {
+                let vault_a_str = vault_a.to_string();
+                
+                // 更新VaultReader（传递原始数据）
+                let amount_result = {
+                    let mut vault_reader = self.vault_reader.lock().unwrap();
+                    vault_reader.update_vault(&vault_a_str, &account_a.data)
+                };
+                
+                match amount_result {
+                    Ok(amount) => {
+                        info!("💰 Fetched initial balance for vault A of {}: {}", pool_name, amount);
+                    }
+                    Err(e) => {
+                        warn!("❌ Failed to update vault A balance for {}: {}", pool_name, e);
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("❌ RPC error fetching vault A for {}: {}", pool_name, e);
+            }
+            Err(e) => {
+                warn!("❌ Task error fetching vault A for {}: {}", pool_name, e);
+            }
+        }
+        
+        // 处理vault B
+        match result_b {
+            Ok(Ok(account_b)) => {
+                let vault_b_str = vault_b.to_string();
+                
+                // 更新VaultReader（传递原始数据）
+                let amount_result = {
+                    let mut vault_reader = self.vault_reader.lock().unwrap();
+                    vault_reader.update_vault(&vault_b_str, &account_b.data)
+                };
+                
+                match amount_result {
+                    Ok(amount) => {
+                        info!("💰 Fetched initial balance for vault B of {}: {}", pool_name, amount);
+                    }
+                    Err(e) => {
+                        warn!("❌ Failed to update vault B balance for {}: {}", pool_name, e);
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("❌ RPC error fetching vault B for {}: {}", pool_name, e);
+            }
+            Err(e) => {
+                warn!("❌ Task error fetching vault B for {}: {}", pool_name, e);
+            }
+        }
+        
+        // 🔥 触发价格重新计算
+        self.trigger_pool_price_recalculation(pool_address, pool_name).await;
+    }
+    
+    /// 🔥 新增：触发池子价格重新计算
+    async fn trigger_pool_price_recalculation(&self, pool_address: &str, pool_name: &str) {
+        // 获取池子配置和数据
+        let (pool_config, pool_data) = {
+            let subscription_map = self.subscription_map.lock().unwrap();
+            let cache = self.pool_data_cache.lock().unwrap();
+            
+            let config = subscription_map.values()
+                .find(|p| p.address == pool_address)
+                .cloned();
+            let data = cache.get(pool_address).cloned();
+            
+            (config, data)
+        };
+        
+        if let (Some(config), Some(data)) = (pool_config, pool_data) {
+            // 解析池子并重新计算价格
+            if let Ok(pool) = PoolFactory::create_pool(&config.pool_type, &data) {
+                let slot = 0;
+                let start_time = std::time::Instant::now();
+                self.update_cache_from_pool(pool.as_ref(), &config, pool_name, slot, start_time);
+                info!("🔄 Recalculated price for {} after fetching vault balances", pool_name);
+            }
+        }
     }
     
     /// 🌐 处理 vault 账户更新

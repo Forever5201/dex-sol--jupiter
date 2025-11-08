@@ -125,6 +125,7 @@ mod tests {
             quote_decimals: 6,
             price: 100.0,
             last_update: Instant::now(),
+            slot: 1000,
         };
         
         let pool_b = PoolPrice {
@@ -137,6 +138,7 @@ mod tests {
             quote_decimals: 6,
             price: 101.0,
             last_update: Instant::now(),
+            slot: 1000,
         };
         
         let opp = detect_arbitrage(&pool_a, &pool_b, 0.5);
@@ -158,6 +160,7 @@ mod tests {
             quote_decimals: 6,
             price: 100.0,
             last_update: Instant::now(),
+            slot: 1000,
         };
         
         let pool_b = PoolPrice {
@@ -170,6 +173,7 @@ mod tests {
             quote_decimals: 6,
             price: 100.1,
             last_update: Instant::now(),
+            slot: 1000,
         };
         
         // 0.1% difference is below 0.5% threshold

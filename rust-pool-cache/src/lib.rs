@@ -3,7 +3,9 @@ pub mod config;
 pub mod price_cache;
 pub mod router;
 pub mod router_bellman_ford;
+pub mod router_bfs;            // 🔥 BFS路由器（快速2-3跳）
 pub mod router_split_optimizer;
+pub mod router_cache;          // 🔥 路径缓存（60-80%延迟降低）
 pub mod router_advanced;
 pub mod database;
 pub mod error_tracker;

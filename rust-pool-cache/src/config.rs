@@ -414,6 +414,9 @@ mod tests {
             database: None,
             router: None,
             logging: None,
+            simulation: None,
+            initialization: None,
+            lst_detector: None,
             pools: vec![
                 PoolConfig {
                     address: "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2".to_string(),

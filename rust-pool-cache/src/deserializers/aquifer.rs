@@ -55,25 +55,55 @@ pub struct AquiferPoolState {
 impl AquiferPoolState {
     /// Get reserve A amount (searching in config fields)
     pub fn get_reserve_a(&self) -> u64 {
-        // Search for reasonable reserve values
-        for i in 0..30 {
+        // 策略1: 首先尝试前几个索引（通常reserve在开头）
+        for i in 0..10 {
             let val = self.config_fields[i];
-            if val > 100_000_000 && val < 100_000_000_000_000 {
+            // 降低最小阈值，接受更小的reserve（如0.1个token）
+            if val > 100_000 && val < 100_000_000_000_000 {
                 return val;
             }
         }
+        
+        // 策略2: 如果前面没找到，搜索整个数组
+        for i in 10..self.config_fields.len() {
+            let val = self.config_fields[i];
+            if val > 100_000 && val < 100_000_000_000_000 {
+                return val;
+            }
+        }
+        
         0
     }
     
     /// Get reserve B amount
     pub fn get_reserve_b(&self) -> u64 {
         let reserve_a = self.get_reserve_a();
-        for i in 1..30 {
+        if reserve_a == 0 {
+            return 0;
+        }
+        
+        // 找到reserve_a的索引位置
+        let reserve_a_idx = self.config_fields.iter()
+            .position(|&x| x == reserve_a);
+        
+        if let Some(idx) = reserve_a_idx {
+            // 策略1: 从reserve_a的下一个位置开始搜索（允许值相等，只要位置不同）
+            for i in (idx + 1)..self.config_fields.len() {
+                let val = self.config_fields[i];
+                if val > 100_000 && val < 100_000_000_000_000 {
+                    return val;  // ✅ 移除了 val != reserve_a 的检查，允许相等
+                }
+            }
+        }
+        
+        // 策略2: 如果后面没找到，从头搜索（跳过reserve_a的位置）
+        for i in 0..reserve_a_idx.unwrap_or(0) {
             let val = self.config_fields[i];
-            if val > 100_000_000 && val < 100_000_000_000_000 && val != reserve_a {
+            if val > 100_000 && val < 100_000_000_000_000 {
                 return val;
             }
         }
+        
         0
     }
     
@@ -199,11 +229,18 @@ mod tests {
         };
         
         // Set test reserves
-        pool.config_fields[0] = 1_000_000_000; // 1000 USDC
-        pool.config_fields[1] = 1_000_000_000; // 1000 USDT
+        pool.config_fields[0] = 1_000_000_000; // 1000 tokens (with 6 decimals = 1000)
+        pool.config_fields[1] = 1_000_000_000; // 1000 tokens (with 6 decimals = 1000)
         
+        let reserve_a = pool.get_reserve_a();
+        let reserve_b = pool.get_reserve_b();
         let price = pool.calculate_price();
-        assert!(price > 0.0, "Price should be positive");
+        
+        println!("Reserve A: {}, Reserve B: {}, Price: {}", reserve_a, reserve_b, price);
+        
+        assert_ne!(reserve_a, 0, "Reserve A should not be zero");
+        assert_ne!(reserve_b, 0, "Reserve B should not be zero");
+        assert!(price > 0.0, "Price should be positive, got {}", price);
     }
 }
 

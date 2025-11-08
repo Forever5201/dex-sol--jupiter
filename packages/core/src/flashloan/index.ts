@@ -8,6 +8,7 @@
 export * from './types';
 export * from './solend-adapter';
 export * from './jupiter-lend-adapter';
+export * from './jupiter-lend-instruction-cache';
 export * from './transaction-builder';
 export * from './solend-alt-manager';
 export * from './jupiter-lend-alt-manager';
@@ -15,6 +16,7 @@ export * from './jupiter-lend-alt-manager';
 // 便捷导出
 export { SolendAdapter } from './solend-adapter';
 export { JupiterLendAdapter } from './jupiter-lend-adapter';
+export { JupiterLendInstructionCache } from './jupiter-lend-instruction-cache';
 export { FlashLoanTransactionBuilder } from './transaction-builder';
 export { SolendALTManager } from './solend-alt-manager';
 export { JupiterLendALTManager } from './jupiter-lend-alt-manager';

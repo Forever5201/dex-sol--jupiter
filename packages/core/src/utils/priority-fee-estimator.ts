@@ -47,7 +47,7 @@ export class PriorityFeeEstimator {
   private readonly MIN_FEE_PER_CU = 20_000;      // 20k micro-lamports (最低保障)
   private readonly MAX_FEE_PER_CU = 100_000;     // 100k micro-lamports (防止极端情况)
   private readonly MAX_FEE_PROFIT_RATIO = 0.10;  // 优先费不超过利润的10%
-  
+
   // 🚀 优化：优先费缓存（30秒TTL）
   private feeCache: { estimate: PriorityFeeEstimate; timestamp: number } | null = null;
   private readonly CACHE_TTL = 30000;  // 30秒过期

@@ -184,11 +184,14 @@ mod tests {
     #[test]
     fn test_size_validation() {
         struct TestStruct {
-            field1: u64,
-            field2: u32,
+            field1: u64,  // 8 bytes
+            field2: u32,  // 4 bytes
+            // + 4 bytes padding for alignment (总共16字节)
         }
         
-        let result = StructSizeValidator::validate::<TestStruct>("TestStruct", 12);
+        // ⭐ Rust会对齐到最大字段的大小(u64=8字节)
+        // 实际布局: [u64:8字节][u32:4字节][padding:4字节] = 16字节
+        let result = StructSizeValidator::validate::<TestStruct>("TestStruct", 16);
         assert!(result.matches);
     }
     
@@ -216,6 +219,10 @@ mod tests {
         assert!(pubkey_offsets.contains(&16));
     }
 }
+
+
+
+
 
 
 

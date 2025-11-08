@@ -132,7 +132,8 @@ only_direct_routes = false
 # 机会发现器配置
 # ===================================================================
 [opportunity_finder]
-mints_file = "./mints-high-liquidity.txt"  # 大流动性代币列表
+mints_file = "./mints-sol-only.txt"  # 🔥 只使用SOL进行套利
+dedicated_worker_mode = false  # 🔥 禁用专用模式，允许1个Worker处理所有Token
 worker_count = 1  # 🔥 Legacy API Lite限速：1 RPS，使用1个Worker
 query_interval_ms = 2000  # 🔥 2秒间隔 = 0.5 RPS (1 Worker × 2 requests / 2s = 1 RPS，符合Lite限速)
 min_profit_lamports = 5_000_000  # 必须覆盖闪电贷费用

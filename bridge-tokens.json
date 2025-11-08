@@ -20,8 +20,8 @@
     "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
     "decimals": 6,
     "priority": 3,
-    "enabled": true,
-    "description": "Tether USD - 稳定币套利机会（已启用）"
+    "enabled": false,
+    "description": "Tether USD - 🔴 已禁用（仅使用USDC以符合Lite API限速）"
   },
   {
     "symbol": "JUP",

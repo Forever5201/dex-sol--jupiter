@@ -1,5 +1,7 @@
 pub mod raydium;
-pub mod raydium_clmm;
+//pub mod raydium_clmm;  // 旧版本（结构错误）
+pub mod raydium_clmm_corrected;  // 修正版本
+pub use raydium_clmm_corrected as raydium_clmm;  // 临时替换
 pub mod lifinity_v2;
 pub mod meteora_dlmm;
 pub mod meteora_dlmm_improved;
@@ -33,6 +35,7 @@ pub use goonfi::GoonFiPoolState;
 pub use tesserav::TesseraVPoolState;
 pub use stabble::StabblePoolState;
 pub use aquifer::AquiferPoolState;
+// Use our wrapper for official Orca Whirlpool type
 pub use whirlpool::WhirlpoolState;
 pub use pancakeswap::PancakeSwapPoolState;
 pub use phoenix::PhoenixMarketState;

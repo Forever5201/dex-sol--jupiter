@@ -34,6 +34,9 @@ bytemuck = "1.14"
 itertools = "0.10.5"
 num-traits = "0.2"
 
+# Orca Whirlpool SDK
+orca_whirlpools_client = "5.0.1"
+
 # 注意：phoenix-sdk-core有复杂的编译依赖（protobuf），暂时不启用
 # phoenix-sdk-core = { path = "../temp_phoenix/rust/crates/phoenix-sdk-core" }
 
@@ -65,6 +68,20 @@ tracing-appender = "0.2"
 
 # Concurrent data structures
 dashmap = "5.5"
+
+# Parallel computation
+rayon = "1.8"  # 🔥 用于并行化Bellman-Ford
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "router_comparison"
+harness = false
+
+[[bin]]
+name = "fetch_pool_account"
+path = "src/bin/fetch_pool_account.rs"
 
 [profile.release]
 opt-level = 3

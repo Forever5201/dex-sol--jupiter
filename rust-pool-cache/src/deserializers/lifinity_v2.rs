@@ -144,7 +144,7 @@ mod tests {
         data[224..256].copy_from_slice(&vault_b.to_bytes());
         
         let pool = LifinityV2PoolState::from_bytes(&data).unwrap();
-        let vaults = pool.extract_vault_addresses();
+        let vaults = pool.get_vault_addresses();
         
         assert!(vaults.is_some(), "Should extract vault addresses");
         let (v_a, v_b) = vaults.unwrap();
@@ -162,8 +162,18 @@ mod tests {
         data[192..224].copy_from_slice(&vault_a.to_bytes());
         data[224..256].copy_from_slice(&vault_b.to_bytes());
         
+        // ⭐ 关键：设置储备量数据（offset 696 = base, offset 576 = quote）
+        // 设置1000 SOL (base) = 1000 * 1e9 lamports
+        let base_reserve: u64 = 1000 * 1_000_000_000;
+        data[696..704].copy_from_slice(&base_reserve.to_le_bytes());
+        
+        // 设置168000 USDC (quote) = 168000 * 1e6 micro-USDC (price ~168 USDC/SOL)
+        let quote_reserve: u64 = 168_000 * 1_000_000;
+        data[576..584].copy_from_slice(&quote_reserve.to_le_bytes());
+        
         let pool = LifinityV2PoolState::from_bytes(&data).unwrap();
-        assert!(pool.is_active(), "Pool with vaults should be active");
+        println!("Reserve base: {}, Reserve quote: {}", pool.reserve_base, pool.reserve_quote);
+        assert!(pool.is_active(), "Pool with reserves should be active");
     }
 }
 
@@ -218,7 +228,25 @@ impl DexPool for LifinityV2PoolState {
     // ⚠️ Lifinity V2 不使用独立vault账户！
     // 储备量直接存储在池子账户中（offset 576和696）
     fn get_vault_addresses(&self) -> Option<(Pubkey, Pubkey)> {
-        None
+        // Lifinity V2 vault地址位于offset 192和224
+        if self.data.len() < 256 {
+            return None;
+        }
+        
+        // 提取vault_a (offset 192-224)
+        let vault_a_bytes = &self.data[192..224];
+        let vault_a = Pubkey::try_from(vault_a_bytes).ok()?;
+        
+        // 提取vault_b (offset 224-256)
+        let vault_b_bytes = &self.data[224..256];
+        let vault_b = Pubkey::try_from(vault_b_bytes).ok()?;
+        
+        // 验证不是全0地址
+        if vault_a == Pubkey::default() || vault_b == Pubkey::default() {
+            return None;
+        }
+        
+        Some((vault_a, vault_b))
     }
 }
 

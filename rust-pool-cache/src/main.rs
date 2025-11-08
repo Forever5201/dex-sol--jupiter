@@ -12,7 +12,9 @@ mod price_cache;
 mod proxy;
 mod router;
 mod router_bellman_ford;
+mod router_bfs;             // 🔥 BFS路由器
 mod router_split_optimizer;
+mod router_cache;           // 🔥 路径缓存
 mod router_advanced;
 mod websocket;
 mod vault_reader;
@@ -381,7 +383,7 @@ async fn main() -> Result<()> {
         let stake_pool_reader_for_task = stake_pool_reader.clone();
         
         tokio::spawn(async move {
-            let advanced_router = AdvancedRouter::new(price_cache_clone.clone(), router_config.clone());
+            let advanced_router = Arc::new(AdvancedRouter::new(price_cache_clone.clone(), router_config.clone()));
             
             // 🔥 创建LST增强检测器（新版）
             let lst_detector = if let Some(reader) = stake_pool_reader_for_task {
@@ -533,7 +535,7 @@ async fn main() -> Result<()> {
                     scan_count += 1;
                     println!("   ✅ Triggering arbitrage scan #{}", scan_count);
                     
-                    let router_clone = advanced_router.clone();
+                    let router_clone = Arc::clone(&advanced_router);
                     let db_clone = db_manager_clone.clone();
                     let router_cfg = router_config.clone();
                     let validation = event_config.validation_strategy.clone();

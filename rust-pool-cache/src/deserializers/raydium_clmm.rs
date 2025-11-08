@@ -141,12 +141,14 @@ impl RaydiumClmmPoolState {
     /// In CLMM, price = 1.0001^tick
     pub fn calculate_price(&self) -> f64 {
         let tick = self.tick_current as f64;
-        // Price = 1.0001^tick
+        // Price = 1.0001^tick (this gives the raw price ratio)
         let price = 1.0001_f64.powf(tick);
         
-        // Adjust for decimals
+        // Adjust for decimals (token_1 per token_0)
+        // If token_0 has more decimals than token_1, we need to scale up
+        // For example: SOL(9 decimals) / USDC(6 decimals) needs 10^(9-6) = 1000
         let decimal_adjustment = 10_f64.powi(
-            self.mint_decimals_1 as i32 - self.mint_decimals_0 as i32
+            self.mint_decimals_0 as i32 - self.mint_decimals_1 as i32
         );
         
         price * decimal_adjustment
@@ -288,6 +290,12 @@ impl DexPool for RaydiumClmmPoolState {
             self.liquidity,
             self.calculate_price()
         ))
+    }
+    
+    fn get_vault_addresses(&self) -> Option<(Pubkey, Pubkey)> {
+        // Raydium CLMM stores reserves in external vault accounts
+        // Similar to Whirlpool, return vault addresses for WebSocket subscription
+        Some((self.token_vault_0, self.token_vault_1))
     }
 }
 

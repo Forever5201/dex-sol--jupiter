@@ -96,6 +96,7 @@ mod integration_tests {
                 base_decimals: 9,
                 quote_decimals: 6,
                 last_update: Instant::now(),
+                slot: 1000,
             },
             PoolPrice {
                 pool_id: "orca_sol_usdc".to_string(),
@@ -107,6 +108,7 @@ mod integration_tests {
                 base_decimals: 9,
                 quote_decimals: 6,
                 last_update: Instant::now(),
+                slot: 1000,
             },
             PoolPrice {
                 pool_id: "solfi_usdc_usdt".to_string(),
@@ -118,6 +120,7 @@ mod integration_tests {
                 base_decimals: 6,
                 quote_decimals: 6,
                 last_update: Instant::now(),
+                slot: 1000,
             },
             PoolPrice {
                 pool_id: "raydium_sol_usdt".to_string(),
@@ -129,6 +132,7 @@ mod integration_tests {
                 base_decimals: 9,
                 quote_decimals: 6,
                 last_update: Instant::now(),
+                slot: 1000,
             },
         ]
     }

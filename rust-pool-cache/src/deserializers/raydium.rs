@@ -148,25 +148,40 @@ impl RaydiumAmmInfo {
         fee_numerator: u64,
         fee_denominator: u64,
     ) -> u64 {
+        if amount_in == 0 {
+            return 0;
+        }
+        
         let (reserve_in, reserve_out) = if is_coin_to_pc {
             (self.coin_vault_amount, self.pc_vault_amount)
         } else {
             (self.pc_vault_amount, self.coin_vault_amount)
         };
         
-        // Deduct fee
-        let amount_in_with_fee = amount_in
-            .checked_mul(fee_denominator - fee_numerator)
-            .unwrap_or(0)
-            .checked_div(fee_denominator)
-            .unwrap_or(0);
+        if reserve_in == 0 || reserve_out == 0 {
+            return 0;
+        }
         
-        // Calculate output: (reserve_out * amount_in_with_fee) / (reserve_in + amount_in_with_fee)
-        reserve_out
-            .checked_mul(amount_in_with_fee)
-            .unwrap_or(0)
-            .checked_div(reserve_in.checked_add(amount_in_with_fee).unwrap_or(u64::MAX))
-            .unwrap_or(0)
+        // 使用u128避免溢出，实现精确的AMM公式
+        // amount_out = (amount_in × (1 - fee) × reserve_out) / (reserve_in × fee_denominator + amount_in × (1 - fee))
+        
+        let amount_in_u128 = amount_in as u128;
+        let reserve_in_u128 = reserve_in as u128;
+        let reserve_out_u128 = reserve_out as u128;
+        let fee_num_u128 = fee_numerator as u128;
+        let fee_denom_u128 = fee_denominator as u128;
+        
+        // amount_in_with_fee = amount_in × (fee_denominator - fee_numerator)
+        let amount_in_with_fee = amount_in_u128 * (fee_denom_u128 - fee_num_u128);
+        
+        // numerator = amount_in_with_fee × reserve_out
+        let numerator = amount_in_with_fee * reserve_out_u128;
+        
+        // denominator = reserve_in × fee_denominator + amount_in_with_fee
+        let denominator = reserve_in_u128 * fee_denom_u128 + amount_in_with_fee;
+        
+        // Return amount_out
+        (numerator / denominator) as u64
     }
     
     /// Get human-readable reserve amounts

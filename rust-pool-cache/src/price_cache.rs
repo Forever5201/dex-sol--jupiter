@@ -50,6 +50,16 @@ impl PoolPrice {
         
         quote / base
     }
+    
+    /// Get reserves (compatible with DexPool trait)
+    pub fn get_reserves(&self) -> (u64, u64) {
+        (self.base_reserve, self.quote_reserve)
+    }
+    
+    /// Get decimals (compatible with DexPool trait)
+    pub fn get_decimals(&self) -> (u8, u8) {
+        (self.base_decimals, self.quote_decimals)
+    }
 }
 
 /// Thread-safe price cache

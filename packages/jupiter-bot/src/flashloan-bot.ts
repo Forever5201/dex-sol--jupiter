@@ -268,9 +268,9 @@ export class FlashloanBot {
     const validationApiKey = this.config.jupiterApi?.validationApiKey || this.config.jupiterApi?.apiKey;
     if (validationApiKey) {
       headers['X-API-Key'] = validationApiKey;
-      logger.info(`✅ Validation API using Ultra API endpoint (Key: ...${validationApiKey.slice(-8)})`);
+      logger.info(`✅ Validation API configured (Key: ...${validationApiKey.slice(-8)}) - Note: Currently unused, Workers use Legacy Swap API`);
     } else {
-      logger.warn('⚠️ No validation API Key configured, using Ultra API without authentication');
+      logger.warn('⚠️ No validation API Key configured');
     }
     
     // 🌐 使用 NetworkAdapter 创建 axios 实例（自动应用代理配置）
@@ -2052,22 +2052,22 @@ export class FlashloanBot {
       
       const quoteAge = Date.now() - (opportunity.discoveredAt || 0);
       logger.info(
-        `🎯 Using Ultra quote for routing guidance (age: ${quoteAge}ms) + ` +
-        `Quote API for instruction building (flash loan support)`
+        `🎯 Using Worker quote for routing guidance (age: ${quoteAge}ms) + ` +
+        `Legacy Swap API for instruction building (flash loan support)`
       );
       
       // 2. 计算最优借款金额
       const borrowAmount = this.calculateOptimalBorrowAmount(opportunity);
       
-      // 3. 初步利润检查（基于Ultra报价，仅过滤明显无利润的情况）
+      // 3. 初步利润检查（基于Worker报价，仅过滤明显无利润的情况）
       const profitRate = opportunity.profit / opportunity.inputAmount;
-      const expectedProfitFromUltra = Math.floor(profitRate * borrowAmount);
+      const expectedProfitFromWorker = Math.floor(profitRate * borrowAmount);
       
       logger.debug(
-        `Profit calculation (Ultra quote): query ${opportunity.inputAmount / LAMPORTS_PER_SOL} SOL -> ` +
+        `Profit calculation (Worker quote): query ${opportunity.inputAmount / LAMPORTS_PER_SOL} SOL -> ` +
         `profit ${opportunity.profit / LAMPORTS_PER_SOL} SOL (${(profitRate * 100).toFixed(4)}%), ` +
         `borrow ${borrowAmount / LAMPORTS_PER_SOL} SOL -> ` +
-        `expected ${expectedProfitFromUltra / LAMPORTS_PER_SOL} SOL`
+        `expected ${expectedProfitFromWorker / LAMPORTS_PER_SOL} SOL`
       );
       
       // 4. 过滤异常ROI
@@ -2080,10 +2080,10 @@ export class FlashloanBot {
         return null;
       }
       
-      // 5. 初步利润过滤（基于Ultra报价，仅过滤明显无利润的情况）
+      // 5. 初步利润过滤（基于Worker报价，仅过滤明显无利润的情况）
       // 注意：这里只做初步过滤，真正的利润验证会在并行预判后基于实际路由报价进行
-      if (expectedProfitFromUltra <= 0) {
-        logger.debug(`❌ 初步检查：Ultra报价显示无利润，跳过`);
+      if (expectedProfitFromWorker <= 0) {
+        logger.debug(`❌ 初步检查：Worker报价显示无利润，跳过`);
         return null;
       }
       
@@ -2098,7 +2098,7 @@ export class FlashloanBot {
       // 🚀 优化：第一阶段 - 只查询最优策略
       const primaryStrategy = { 
         name: '最优路由', 
-        maxAccounts: 28, 
+        maxAccounts: 20,  // 🔥 降低到20以减少交易大小（从28降低）
         onlyDirectRoutes: false 
       };
 
@@ -2175,38 +2175,38 @@ export class FlashloanBot {
       // 🚀 第二阶段：如果需要，查询降级策略
       if (swap1Results.length === 0) {
         const fallbackStrategies = [
-          { name: '中等限制', maxAccounts: 24, onlyDirectRoutes: false },
-          { name: '严格限制', maxAccounts: 20, onlyDirectRoutes: true },
-        ];
-        
+        { name: '中等限制', maxAccounts: 18, onlyDirectRoutes: false },  // 🔥 降低账户限制
+        { name: '严格限制', maxAccounts: 16, onlyDirectRoutes: true },   // 🔥 更严格的限制
+      ];
+      
         logger.debug(`🚀 第二阶段：查询${fallbackStrategies.length}个降级策略...`);
         const fallbackStart = Date.now();
         
         const [fallbackSwap1Results, fallbackSwap2Results] = await Promise.all([
           Promise.all(fallbackStrategies.map(strategy =>
-            this.buildSwapInstructionsFromQuoteAPI({
-              inputMint: opportunity.inputMint,
-              outputMint: opportunity.bridgeMint!,
-              amount: borrowAmount,
-              slippageBps: 50,
-              ultraRoutePlan: opportunity.outboundQuote.routePlan,
-              maxAccounts: strategy.maxAccounts,
-              onlyDirectRoutes: strategy.onlyDirectRoutes,
-            }).then(result => ({ strategy, result }))
+        this.buildSwapInstructionsFromQuoteAPI({
+          inputMint: opportunity.inputMint,
+          outputMint: opportunity.bridgeMint!,
+          amount: borrowAmount,
+          slippageBps: 50,
+          ultraRoutePlan: opportunity.outboundQuote.routePlan,
+          maxAccounts: strategy.maxAccounts,
+          onlyDirectRoutes: strategy.onlyDirectRoutes,
+        }).then(result => ({ strategy, result }))
           )),
           Promise.all(fallbackStrategies.map(strategy =>
-            this.buildSwapInstructionsFromQuoteAPI({
-              inputMint: opportunity.bridgeMint!,
-              outputMint: opportunity.outputMint,
-              amount: opportunity.bridgeAmount!,
-              slippageBps: 50,
-              ultraRoutePlan: opportunity.returnQuote.routePlan,
-              maxAccounts: strategy.maxAccounts,
-              onlyDirectRoutes: strategy.onlyDirectRoutes,
-            }).then(result => ({ strategy, result }))
+        this.buildSwapInstructionsFromQuoteAPI({
+          inputMint: opportunity.bridgeMint!,
+          outputMint: opportunity.outputMint,
+          amount: opportunity.bridgeAmount!,
+          slippageBps: 50,
+          ultraRoutePlan: opportunity.returnQuote.routePlan,
+          maxAccounts: strategy.maxAccounts,
+          onlyDirectRoutes: strategy.onlyDirectRoutes,
+        }).then(result => ({ strategy, result }))
           ))
         ]);
-        
+      
         const fallbackLatency = Date.now() - fallbackStart;
         logger.info(`✅ 降级策略查询完成 (${fallbackLatency}ms)`);
         
@@ -2700,6 +2700,7 @@ export class FlashloanBot {
         slippageBps: params.slippageBps,
         onlyDirectRoutes: params.onlyDirectRoutes !== undefined ? params.onlyDirectRoutes : false, // 🆕 使用策略参数
         maxAccounts: params.maxAccounts !== undefined ? params.maxAccounts : 20, // 🆕 使用策略参数
+        restrictIntermediateTokens: true,  // 🔥 限制中间代币，减少路由复杂度
       };
       
         // 如果有 Ultra 的路由信息，尝试锁定 DEX（引导路由）
@@ -2720,9 +2721,9 @@ export class FlashloanBot {
       } else {
         // 缓存未命中，调用API
         quoteResponse = await this.jupiterQuoteAxios.get('/quote', {
-          params: quoteParams,
+        params: quoteParams,
           timeout: 30000,
-        });
+      });
       }
       
       if (!quoteResponse.data || !quoteResponse.data.outAmount) {
@@ -2789,8 +2790,11 @@ export class FlashloanBot {
       const swapInstructionsResponse = await this.jupiterQuoteAxios.post('/swap-instructions', {
         quoteResponse: quoteResponse.data,
         userPublicKey: this.keypair.publicKey.toBase58(),
-        wrapAndUnwrapSol: true,
+        wrapAndUnwrapSol: false,  // 🔥 闪电贷已是wSOL，不需要wrap/unwrap（省~40 bytes）
         dynamicComputeUnitLimit: true,
+        asLegacyTransaction: false,  // 🔥 启用 Versioned Transaction + LUT 压缩
+        useSharedAccounts: true,     // 🔥 启用共享账户优化
+        skipUserAccountsRpcCalls: true,  // 🔥 跳过RPC调用，加快速度
           // prioritizationFeeLamports: 'auto', // 让 Jupiter 自动设置优先费
       }, {
           timeout: 30000,

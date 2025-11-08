@@ -76,6 +76,7 @@ mod bellman_ford_tests {
             base_decimals: 9,
             quote_decimals: 6,
             last_update: Instant::now(),
+            slot: 1000,
         }
     }
 }

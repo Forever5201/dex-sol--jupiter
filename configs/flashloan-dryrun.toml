@@ -149,13 +149,10 @@ mints_file = "mints-simple.txt"  # 初始代币列表
 # 桥接代币从 bridge-tokens.json 自动加载（OpportunityFinder 读取并分配给Workers）
 # 环形套利路径 = 初始代币 × 桥接代币（双向查询）
 
-# 速率限制配置 - 方案B均衡型（4 Workers × 4 Tokens）
+# 速率限制配置 - Lite API 单Worker模式
 # ============================================================
-# Worker分配策略：每个Worker负责1个特定桥接代币
+# Worker分配策略：1个Worker处理所有启用的桥接代币（当前仅USDC）
 #   Worker 0 → USDC (最高流动性)
-#   Worker 1 → USDT (高流动性)
-#   Worker 2 → mSOL (质押衍生品)
-#   Worker 3 → jitoSOL (Jito生态)
 #
 # 速率计算（Legacy API Lite限速）：
 #   🔥 Legacy API Lite限速：60 requests per 60 seconds (1 RPS)
@@ -166,6 +163,7 @@ mints_file = "mints-simple.txt"  # 初始代币列表
 #   - Pro I: 10 RPS = ~$49/月
 #   - Pro II: 50 RPS = ~$99/月
 # ============================================================
+dedicated_worker_mode = false  # 🔥 禁用专用模式，允许1个Worker处理所有Token
 worker_count = 1  # 🔥 使用1个Worker（Lite限速）
 query_interval_ms = 2000  # 🔥 2秒间隔（1 RPS，符合Lite限速）
 min_profit_lamports = 500_000  # 0.0005 SOL（生产阈值）

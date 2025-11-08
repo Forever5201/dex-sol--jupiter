@@ -354,7 +354,7 @@ mod tests {
             base_key: Pubkey::default(),
             activation_type: 0,
             _padding1: [0; 7],
-            padding: [0; 200],
+            padding: [0; 152],
         };
         
         // At active_id = 0, price should be 1.0
@@ -430,7 +430,7 @@ mod tests {
             base_key: Pubkey::default(),
             activation_type: 0,
             _padding1: [0; 7],
-            padding: [0; 200],
+            padding: [0; 152],
         };
         
         assert!(pool.is_in_range());

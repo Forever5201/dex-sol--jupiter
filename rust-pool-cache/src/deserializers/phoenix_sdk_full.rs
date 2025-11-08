@@ -204,6 +204,8 @@ mod tests {
         let market = PhoenixMarketFull {
             base_mint: Pubkey::default(),
             quote_mint: Pubkey::default(),
+            base_vault: Pubkey::default(),
+            quote_vault: Pubkey::default(),
             base_decimals: 9,
             quote_decimals: 6,
             best_bid: Some(100.50),

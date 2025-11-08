@@ -496,14 +496,15 @@ mod tests {
         
         collector.record_subscription("SOL/USDC", "addr1");
         collector.record_subscription("SOL/USDC", "addr1");
-        collector.record_price_update("SOL/USDC", 100.0);
+        collector.record_price_update("SOL/USDC", 100.0);  // 内部会再调用1次record_subscription
         
         assert_eq!(collector.active_pools_count(), 1);
-        assert_eq!(collector.total_subscriptions(), 2);
+        // ⭐ 2次显式订阅 + 1次价格更新中的隐式订阅 = 3
+        assert_eq!(collector.total_subscriptions(), 3);
         assert_eq!(collector.total_updates(), 1);
         
         let stats = collector.get_pool_stats("SOL/USDC").unwrap();
-        assert_eq!(stats.total_subscriptions, 2);
+        assert_eq!(stats.total_subscriptions, 3);  // 修正期望值
         assert_eq!(stats.price_updates, 1);
     }
 

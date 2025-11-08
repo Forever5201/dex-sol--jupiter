@@ -14,10 +14,12 @@
 
 use crate::router::Router;
 use crate::router_bellman_ford::BellmanFordScanner;
+use crate::router_bfs::BfsScanner;  // 🔥 新增：BFS扫描器
 use crate::router_split_optimizer::{SplitOptimizer, OptimizedPath};
+use crate::router_cache::RouterCache;  // 🔥 新增：路径缓存
 use crate::price_cache::PriceCache;
-use std::sync::Arc;
-use tracing::{info, debug, warn};
+use std::sync::{Arc, Mutex};
+use tracing::{info, debug};
 
 /// 路由器模式
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,14 +68,19 @@ impl Default for AdvancedRouterConfig {
 }
 
 /// 高级路由器
-#[derive(Clone)]
+/// 
+/// 注意：不实现Clone因为包含Mutex<RouterCache>
 pub struct AdvancedRouter {
     /// 快速扫描器（现有混合算法）
     quick_scanner: Router,
+    /// BFS扫描器（快速2-3跳，剪枝优化）
+    bfs_scanner: BfsScanner,  // 🔥 新增
     /// Bellman-Ford扫描器
     bf_scanner: BellmanFordScanner,
     /// 拆分优化器
     split_optimizer: SplitOptimizer,
+    /// 路径缓存（60-80%延迟降低）
+    path_cache: Arc<Mutex<RouterCache>>,  // 🔥 新增
     /// 配置
     config: AdvancedRouterConfig,
     /// 价格缓存（用于实时获取数据）
@@ -84,13 +91,17 @@ impl AdvancedRouter {
     /// 创建新的高级路由器
     pub fn new(price_cache: Arc<PriceCache>, config: AdvancedRouterConfig) -> Self {
         let quick_scanner = Router::new(price_cache.clone());
+        let bfs_scanner = BfsScanner::new(3, config.min_roi_percent);  // 🔥 BFS限制3跳
         let bf_scanner = BellmanFordScanner::new(config.max_hops, config.min_roi_percent);
         let split_optimizer = SplitOptimizer::new(config.max_splits, config.min_split_amount);
+        let path_cache = Arc::new(Mutex::new(RouterCache::new(30, 1000)));  // 🔥 30秒TTL，1000条目
         
         Self {
             quick_scanner,
+            bfs_scanner,  // 🔥 新增
             bf_scanner,
             split_optimizer,
+            path_cache,  // 🔥 新增
             config,
             price_cache,
         }
@@ -146,14 +157,14 @@ impl AdvancedRouter {
     async fn complete_scan(&self, amount: f64) -> Vec<OptimizedPath> {
         println!("   📡 Fetching price data...");
         
-        // 🎯 数据一致性：放宽要求以适应实际情况
-        // 参数：10000ms新鲜度（10秒），50 slot差异（约20秒）
-        let consistent_prices = self.price_cache.get_consistent_snapshot(10000, 50);
+        // 🎯 数据一致性：收紧阈值确保价格新鲜度（减少过期机会）
+        // 参数：2000ms新鲜度（2秒），10 slot差异（约4秒）
+        let consistent_prices = self.price_cache.get_consistent_snapshot(2000, 10);
         
         // 如果一致性数据太少，降级到仅新鲜度过滤
         let all_prices = if consistent_prices.len() < 10 {
             println!("   ⚠️  Consistent snapshot too small ({}), falling back to fresh prices", consistent_prices.len());
-            self.price_cache.get_fresh_prices(60000)  // 60秒
+            self.price_cache.get_fresh_prices(5000)  // 降级也收紧到5秒
         } else {
             println!("   ✅ Using consistent snapshot with {} pools", consistent_prices.len());
             consistent_prices
@@ -168,12 +179,17 @@ impl AdvancedRouter {
         let latest_slot = self.price_cache.get_latest_slot();
         println!("   📊 Latest slot: {}, using {} pools for routing", latest_slot, all_prices.len());
         
-        // 并行执行快速扫描和深度扫描
-        println!("   🚀 Starting parallel scan: Quick (2-3 hop) + Bellman-Ford (4-6 hop)");
+        // 🔥 三路并行扫描：Quick + BFS + Bellman-Ford
+        println!("   🚀 Starting parallel scan: Quick (legacy) + BFS (2-3 hop) + Bellman-Ford (4-6 hop)");
         
         let quick_start = tokio::time::Instant::now();
         let quick_future = async {
             self.quick_scanner.find_all_opportunities(amount)
+        };
+        
+        let bfs_start = tokio::time::Instant::now();
+        let bfs_future = async {
+            self.bfs_scanner.find_all_opportunities(&all_prices, amount)
         };
         
         let deep_start = tokio::time::Instant::now();
@@ -181,13 +197,15 @@ impl AdvancedRouter {
             self.bf_scanner.find_all_cycles(&all_prices, amount)
         };
         
-        let (quick_paths, deep_paths) = tokio::join!(quick_future, deep_future);
+        let (quick_paths, bfs_paths, deep_paths) = tokio::join!(quick_future, bfs_future, deep_future);
         
         println!("   ⚡ Quick scan: {} paths in {:?}", quick_paths.len(), quick_start.elapsed());
+        println!("   🔥 BFS scan: {} paths in {:?}", bfs_paths.len(), bfs_start.elapsed());
         println!("   🔍 Bellman-Ford: {} paths in {:?}", deep_paths.len(), deep_start.elapsed());
         
         // 合并所有路径
         let mut all_paths = quick_paths;
+        all_paths.extend(bfs_paths);
         all_paths.extend(deep_paths);
         let total_before_dedup = all_paths.len();
         

@@ -54,6 +54,22 @@ configs/database.toml
 
 # 文档中的敏感信息
 docs/config/API_KEY_配置指南.md
+微信推送*.md
+*test-serverchan*.js
+*test-wechat*.js
+test-bot-monitoring.ts
+test-wechat-push.ts
+
+# Rust配置文件（包含API密钥）
+rust-pool-cache/config.toml
+rust-pool-cache/config-*.toml
+!rust-pool-cache/config.toml.example
+
+# 启动脚本（可能包含密钥）
+start-jupiter-*.sh
+start-jupiter-*.bat
+solana-rpc-proxy.js
+test-all-proxy-methods.sh
 
 # Temporary
 tmp/

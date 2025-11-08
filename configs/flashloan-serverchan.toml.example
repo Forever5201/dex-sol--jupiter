@@ -31,9 +31,9 @@ proxy_url = "http://127.0.0.1:7890"
 [rpc]
 # Helius免费RPC - 支持优先费查询、25 RPS限制、国内访问较快
 # 注册地址: https://helius.dev
-helius_api_key = "d261c4a1-fffe-4263-b0ac-a667c05b5683"
+helius_api_key = "YOUR_HELIUS_API_KEY_HERE"  # 从 https://helius.dev 获取
 urls = [
-  "https://mainnet.helius-rpc.com/?api-key=d261c4a1-fffe-4263-b0ac-a667c05b5683",
+  "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_API_KEY_HERE",
   "https://api.mainnet-beta.solana.com",  # 备用（不支持优先费查询）
 ]
 commitment = "processed"
@@ -112,9 +112,9 @@ safety_margin = 1.5  # 安全边际
 # ===================================================================
 [jupiter_api]
 # 🔑 Ultra API 密钥（必填！）
-api_key = "3cf45ad3-12bc-4832-9307-d0b76357e005"
+api_key = "YOUR_JUPITER_API_KEY_HERE"  # 从 Jupiter 获取
 # 验证 API 密钥（可选，用于二次验证）
-validation_api_key = "3cf45ad3-12bc-4832-9307-d0b76357e005"
+validation_api_key = "YOUR_JUPITER_API_KEY_HERE"  # 可与api_key相同
 # Ultra API 端点
 endpoint = "https://api.jup.ag/ultra"
 
@@ -206,7 +206,7 @@ enabled = false  # 默认禁用，安装 PostgreSQL 后改为 true
 enabled = true
 
 [monitoring.serverchan]
-send_key = "SCT299918Tjm2hNLuwKRB9DqqHaiDvj3kJ"  # 您的 SendKey
+send_key = "YOUR_SERVERCHAN_SENDKEY_HERE"  # 从 https://sct.ftqq.com/ 获取
 enabled = true
 
 # 通知设置

@@ -6,7 +6,7 @@
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.3-blue)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-20+-green)](https://nodejs.org/)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-All_Rights_Reserved-red.svg)](LICENSE)
 
 </div>
 
@@ -364,6 +364,23 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 - [NotArb](https://github.com/jito-labs/notarb) - 专业级套利机器人参考
 - [Jito Labs](https://www.jito.wtf/) - MEV 基础设施
 - [Jupiter Aggregator](https://jup.ag/) - Solana 聚合器
+
+---
+
+## 📜 许可证
+
+**版权所有 © 2025 Forever5201. 保留所有权利。**
+
+本项目源代码仅供**查看和学习参考**使用。
+
+⚠️ **重要提示**：
+- ❌ 未经授权不得使用、复制、修改或分发本软件
+- ❌ 不得用于商业或生产环境
+- ✅ 仅允许个人学习和研究
+
+如需商业使用或授权，请联系作者。
+
+详见 [LICENSE](LICENSE) 文件。
 
 ---
 

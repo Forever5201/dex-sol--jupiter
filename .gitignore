@@ -27,6 +27,7 @@ npm-debug.log*
 *.swo
 *.sublime-workspace
 *.sublime-project
+cursor-chat/
 
 # OS
 .DS_Store
@@ -93,6 +94,10 @@ RUST_*.md
 JUPITER_*.md
 METEORA_*.md
 POOL_*.md
+LST_*.md
+OPTIMIZATION_*.md
+ORCA_*.md
+QUICK_START_*.md
 !README.md
 !LICENSE
 

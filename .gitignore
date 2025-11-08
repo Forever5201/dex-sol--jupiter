@@ -76,6 +76,26 @@ tmp/
 temp/
 .cache/
 
+# Development logs and reports (exclude from repository)
+# 开发日志和报告（不提交到仓库）
+*BUG*.md
+*修复*.md
+*测试*.md
+*报告*.md
+*实施*.md
+*完成*.md
+*分析*.md
+*优化*.md
+*指南*.md
+*说明*.md
+*总结*.md
+RUST_*.md
+JUPITER_*.md
+METEORA_*.md
+POOL_*.md
+!README.md
+!LICENSE
+
 # Jupiter Lend instruction cache
 cache/
 jupiter-lend-instructions.json

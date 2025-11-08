@@ -16,8 +16,9 @@ npm-debug.log*
 
 # Environment
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
+!.env.proxy-example
 
 # IDE
 .vscode/
@@ -38,12 +39,21 @@ desktop.ini
 *-keypair.json
 test-keypair.json
 !example-keypair.json
+keypairs/
+keypairs-backup/
+*.p12
+*.pfx
 # 注意：配置文件将被提交，请确保不包含真实密钥和RPC地址
+# 如果要分享，建议手动创建示例配置文件（替换真实RPC和密钥）
 
 # Temporary
 tmp/
 temp/
 .cache/
+
+# Jupiter Lend instruction cache
+cache/
+jupiter-lend-instructions.json
 
 # Test coverage
 coverage/

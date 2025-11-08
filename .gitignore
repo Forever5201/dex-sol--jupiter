@@ -52,6 +52,9 @@ configs/database.toml
 !configs/*.example
 !configs/*.toml.example
 
+# 文档中的敏感信息
+docs/config/API_KEY_配置指南.md
+
 # Temporary
 tmp/
 temp/

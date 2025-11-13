@@ -97,7 +97,7 @@ export class DatabaseCleanup {
       const trades = await db.trade.findMany({
         select: { id: true },
       });
-      const tradeIds = trades.map(t => t.id);
+      const tradeIds = trades.map((t: any) => t.id);
 
       // 删除不在交易列表中的路由
       const result = await db.tradeRoute.deleteMany({

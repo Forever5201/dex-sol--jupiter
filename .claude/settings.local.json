@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(findstr:*)",
+      "Bash(npm run build)",
+      "Bash(npx tsc:*)",
+      "WebSearch",
+      "WebFetch(domain:station.jup.ag)",
+      "WebFetch(domain:dev.jup.ag)",
+      "WebFetch(domain:github.com)",
+      "Bash(git restore:*)",
+      "Bash(cat:*)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

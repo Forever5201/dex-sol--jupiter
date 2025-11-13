@@ -108,7 +108,7 @@ export async function executeTransaction<T>(
   fn: (tx: PrismaClient) => Promise<T>
 ): Promise<T> {
   const db = getDatabase();
-  return await db.$transaction(async (tx) => {
+  return await db.$transaction(async (tx: any) => {
     return await fn(tx as PrismaClient);
   });
 }
@@ -116,5 +116,6 @@ export async function executeTransaction<T>(
 // 导出类型
 export * from '@prisma/client';
 
-
-
+// 导出统计分析类
+export { OpportunityAnalytics } from './analytics';
+export type { FunnelAnalysis, MatrixAnalysis, PerformanceAnalysis } from './analytics';

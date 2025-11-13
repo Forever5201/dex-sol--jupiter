@@ -92,10 +92,56 @@ model Opportunity {
   expectedProfit  BigInt    @map("expected_profit")
   expectedRoi     Decimal   @map("expected_roi") @db.Decimal(10, 4)
   
+  // ==================== 新增：构建阶段追踪 ====================
+  // 构建开始和完成时间
+  buildStartedAt      DateTime? @map("build_started_at") @db.Timestamptz(6)
+  buildCompletedAt    DateTime? @map("build_completed_at") @db.Timestamptz(6)
+  buildLatencyMs      Int?      @map("build_latency_ms")
+  buildSuccess        Boolean?  @map("build_success")
+  buildError          String?   @map("build_error") @db.Text
+  transactionSize     Int?      @map("transaction_size")
+  isBundleMode        Boolean?  @map("is_bundle_mode")
+  
+  // ==================== 新增：模拟阶段追踪 ====================
+  simulationStartedAt   DateTime? @map("simulation_started_at") @db.Timestamptz(6)
+  simulationCompletedAt DateTime? @map("simulation_completed_at") @db.Timestamptz(6)
+  simulationLatencyMs   Int?      @map("simulation_latency_ms")
+  simulationSuccess     Boolean?  @map("simulation_success")
+  simulationError       String?   @map("simulation_error") @db.Text
+  simulationComputeUnits Int?     @map("simulation_compute_units")
+  
+  // ==================== 新增：二次验证阶段追踪 ====================
+  validationStartedAt     DateTime? @map("validation_started_at") @db.Timestamptz(6)
+  validationCompletedAt   DateTime? @map("validation_completed_at") @db.Timestamptz(6)
+  validationLatencyMs     Int?      @map("validation_latency_ms")
+  validationSuccess       Boolean?  @map("validation_success")
+  secondProfit            BigInt?   @map("second_profit")
+  secondRoi               Decimal?  @map("second_roi") @db.Decimal(10, 4)
+  priceDrift              Decimal?  @map("price_drift") @db.Decimal(10, 6)
+  isProfitableAfterFees   Boolean?  @map("is_profitable_after_fees")
+  estimatedGasFee         BigInt?   @map("estimated_gas_fee")
+  estimatedPriorityFee    BigInt?   @map("estimated_priority_fee")
+  estimatedJitoTip        BigInt?   @map("estimated_jito_tip")
+  estimatedSlippageBuffer BigInt?   @map("estimated_slippage_buffer")
+  netProfitAfterFees      BigInt?   @map("net_profit_after_fees")
+  
+  // ==================== 新增：并行处理统计 ====================
+  parallelStartedAt     DateTime? @map("parallel_started_at") @db.Timestamptz(6)
+  parallelCompletedAt   DateTime? @map("parallel_completed_at") @db.Timestamptz(6)
+  parallelTotalLatencyMs Int?     @map("parallel_total_latency_ms")
+  buildTotalLatencyMs   Int?      @map("build_total_latency_ms")  // 构建+模拟总耗时
+  
+  // ==================== 新增：过滤判断 ====================
+  passedSimulation  Boolean? @map("passed_simulation")
+  passedValidation  Boolean? @map("passed_validation")
+  passedBoth        Boolean? @map("passed_both")
+  shouldExecute     Boolean? @map("should_execute")
+  
   // 执行信息
   executed        Boolean   @default(false)
   tradeId         BigInt?   @map("trade_id")
   trade           Trade[]
+  executionStatus String?   @map("execution_status") @db.VarChar(20)  // pending/executed/filtered/failed
   
   // 过滤原因
   filtered        Boolean   @default(false)
@@ -104,7 +150,7 @@ model Opportunity {
   // 元数据
   metadata        Json?     @db.JsonB
   
-  // 二次验证关联
+  // 二次验证关联（保留兼容性）
   validation      OpportunityValidation?
   
   @@index([discoveredAt(sort: Desc)])
@@ -112,6 +158,10 @@ model Opportunity {
   @@index([expectedProfit(sort: Desc)])
   @@index([inputMint])
   @@index([bridgeToken])
+  @@index([passedBoth])
+  @@index([executionStatus])
+  @@index([buildSuccess])
+  @@index([simulationSuccess])
   @@map("opportunities")
 }
 

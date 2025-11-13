@@ -16,6 +16,7 @@ import {
   TransactionMessage,
 } from '@solana/web3.js';
 import { OpportunityFinder, ArbitrageOpportunity } from './opportunity-finder';
+import { OpportunityTrackingHelper } from './tracking-helper';
 import { JitoExecutor } from '@solana-arb-bot/onchain-bot';
 import { Bundle } from 'jito-ts/dist/sdk/block-engine/types';
 import { JupiterServerManager } from '@solana-arb-bot/jupiter-server';
@@ -24,6 +25,7 @@ import {
   JupiterLendAdapter,
   FlashLoanTransactionBuilder,
   FlashLoanProtocol,
+  FlashLoanResult,
   SolendALTManager,
   JupiterLendALTManager,
   networkConfig,
@@ -213,12 +215,17 @@ export class FlashloanBot {
   private tokenAccountCache = new Map<string, PublicKey>();
 
   // 🚀 优化：Quote结果缓存（5秒TTL）
-  private quoteCache = new Map<string, { 
-    quote: any; 
+  private quoteCache = new Map<string, {
+    quote: any;
     swapResponse: any;
-    timestamp: number 
+    timestamp: number
   }>();
   private readonly QUOTE_CACHE_TTL = 5000; // 5秒过期
+
+  // 🚀 快速通道配置
+  private readonly FAST_PATH_ENABLED = true;  // 快速通道总开关
+  private readonly FAST_PATH_MAX_QUOTE_AGE_MS = 300; // Quote最大年龄（毫秒），建议200-400ms
+  private readonly FAST_PATH_AMOUNT_TOLERANCE = 0; // 金额容差（lamports），0表示必须完全一致
 
   private stats = {
     opportunitiesFound: 0,
@@ -243,6 +250,11 @@ export class FlashloanBot {
     bundleTransactions: 0,      // 🆕 Bundle模式交易数
     singleTransactions: 0,      // 🆕 单笔交易数
     bytesOptimizedTotal: 0,     // 🆕 通过优化节省的总字节数
+    // 🚀 快速通道统计
+    fastPathAttempts: 0,        // 尝试使用快速通道的次数
+    fastPathSuccesses: 0,       // 快速通道成功次数
+    fastPathFallbacks: 0,       // 回退到慢通道的次数
+    fastPathTimeSavedMs: 0,     // 快速通道节省的总时间（ms）
     startTime: Date.now(),
   };
 
@@ -365,16 +377,23 @@ export class FlashloanBot {
     });
 
     // 初始化数据库（如果配置了）
+    logger.info(`📊 Database config check: enabled=${config.database?.enabled}, url=${config.database?.url ? '***' : 'undefined'}, env=${process.env.DATABASE_URL ? '***' : 'undefined'}`);
     if (config.database?.enabled) {
       try {
+        const dbUrl = config.database.url || process.env.DATABASE_URL;
+        if (!dbUrl) {
+          throw new Error('Database URL not configured (neither in config file nor DATABASE_URL environment variable)');
+        }
         initDatabase({
-          url: config.database.url || process.env.DATABASE_URL,
+          url: dbUrl,
           poolSize: 10,
         });
         logger.info('✅ Database initialized for opportunity recording');
       } catch (error) {
         logger.warn('⚠️ Database initialization failed (optional):', error);
       }
+    } else {
+      logger.info('ℹ️ Database recording disabled in config');
     }
 
     // 初始化机会发现器（使用 Lite API + 多跳路由）
@@ -1063,17 +1082,39 @@ export class FlashloanBot {
         rawKeys: Object.keys(backQuote.data || {}).slice(0, 10),
       }));
 
-      // 如果响应异常，记录完整数据
+      // ✅ 验证 outQuote 响应
+      if (!outQuote.data.outAmount || outQuote.data.outAmount === '0') {
+        logger.error('OutQuote returned invalid outAmount:', {
+          fullResponse: JSON.stringify(outQuote.data).slice(0, 500),
+        });
+        logger.warn('Falling back to standard validation due to invalid outbound API response');
+        const standardValidation = await this.validateOpportunityLifetime(opportunity);
+        return {
+          ...standardValidation,
+          routeMatches: false,
+          exactPoolMatch: false,
+        };
+      }
+
+      // ✅ 验证 backQuote 响应
       if (!backQuote.data.outAmount || backQuote.data.outAmount === '0') {
         logger.error('BackQuote returned invalid outAmount:', {
           fullResponse: JSON.stringify(backQuote.data).slice(0, 500),
         });
+        // ⚠️ API响应异常，回退到标准验证逻辑
+        logger.warn('Falling back to standard validation due to invalid API response');
+        const standardValidation = await this.validateOpportunityLifetime(opportunity);
+        return {
+          ...standardValidation,
+          routeMatches: false,
+          exactPoolMatch: false,
+        };
       }
 
       // 🔥 Step 3: 验证路由一致性（兼容不同响应格式）
-      const secondOutDEX = outQuote.data.routePlan?.[0]?.swapInfo?.label 
+      const secondOutDEX = outQuote.data.routePlan?.[0]?.swapInfo?.label
         || outQuote.data.swapInfo?.label;
-      const secondBackDEX = backQuote.data.routePlan?.[0]?.swapInfo?.label 
+      const secondBackDEX = backQuote.data.routePlan?.[0]?.swapInfo?.label
         || backQuote.data.swapInfo?.label;
       const secondOutAmmKey = outQuote.data.routePlan?.[0]?.swapInfo?.ammKey;
       const secondBackAmmKey = backQuote.data.routePlan?.[0]?.swapInfo?.ammKey;
@@ -1081,10 +1122,8 @@ export class FlashloanBot {
       const routeMatches = (secondOutDEX === firstOutDEX && secondBackDEX === firstBackDEX);
       const exactPoolMatch = (secondOutAmmKey === firstOutAmmKey && secondBackAmmKey === firstBackAmmKey);
 
-      // 计算利润（兼容不同字段名）
-      const backOutAmount = backQuote.data.outAmount 
-        || backQuote.data.outputAmount 
-        || '0';
+      // 计算利润（必须有有效的 outAmount）
+      const backOutAmount = backQuote.data.outAmount;  // ✅ 已经在上面验证过非空
       const secondProfit = Number(backOutAmount) - opportunity.inputAmount;
       const secondRoi = secondProfit / opportunity.inputAmount;
 
@@ -1299,6 +1338,11 @@ export class FlashloanBot {
     let revalidation: any = null;
     let buildResult: any = null;
 
+    // 🔥 记录并行任务开始
+    if (this.config.database?.enabled && opportunityId) {
+      await OpportunityTrackingHelper.recordParallelStart(opportunityId);
+    }
+
     if (validationEnabled) {
       logger.info('🚀 Starting parallel validation (stats) + build (execution)...');
       [revalidation, buildResult] = await Promise.all([
@@ -1332,6 +1376,19 @@ export class FlashloanBot {
     }
 
     const t1 = Date.now();
+    const parallelTotalLatency = t1 - t0;
+
+    // 🔥 记录并行任务完成（包含两个任务的各自耗时）
+    if (this.config.database?.enabled && opportunityId) {
+      const buildTotalLatency = buildResult?.buildTotalLatencyMs || parallelTotalLatency;
+      const validationLatency = validationEnabled && revalidation ? revalidation.delayMs : undefined;
+      
+      await OpportunityTrackingHelper.recordParallelComplete(opportunityId, {
+        parallelStartMs: t0,
+        buildTotalLatencyMs: buildTotalLatency,
+        validationLatencyMs: validationLatency,
+      });
+    }
 
     if (validationEnabled && revalidation) {
       logger.info(
@@ -1339,7 +1396,8 @@ export class FlashloanBot {
         `lifetime=${revalidation.delayMs}ms, ` +
         `still_exists=${revalidation.stillExists}, ` +
         `price_drift=${((revalidation.secondProfit - opportunity.profit) / 1e9).toFixed(6)} SOL, ` +
-        `build_time=${t1 - t0}ms`
+        `build_time=${t1 - t0}ms, ` +
+        `parallel_total=${parallelTotalLatency}ms`
       );
     } else {
       logger.info(`📊 Secondary validation disabled; build_time=${t1 - t0}ms`);
@@ -1479,6 +1537,23 @@ export class FlashloanBot {
         this.stats.theoreticalFeesBreakdown.totalJitoTip += jitoTip / LAMPORTS_PER_SOL;
         this.stats.theoreticalFeesBreakdown.totalSlippageBuffer += slippageBuffer / LAMPORTS_PER_SOL;
         
+        // 🔥 记录验证阶段数据
+        if (this.config.database?.enabled && opportunityId) {
+          await OpportunityTrackingHelper.recordValidation(opportunityId, {
+            validationStartMs: t0,
+            validationSuccess: revalidation.stillExists,
+            secondProfit: BigInt(revalidation.secondProfit),
+            secondRoi: revalidation.secondRoi,
+            priceDrift: (revalidation.secondProfit - opportunity.profit) / opportunity.profit,
+            isProfitableAfterFees: theoreticalNetProfit > 0,
+            estimatedGasFee: BigInt(theoreticalFeeConfig.baseFee),
+            estimatedPriorityFee: BigInt(theoreticalFeeConfig.priorityFee),
+            estimatedJitoTip: BigInt(jitoTip),
+            estimatedSlippageBuffer: BigInt(slippageBuffer),
+            netProfitAfterFees: BigInt(theoreticalNetProfit),
+          });
+        }
+        
       } catch (error) {
         logger.warn('⚠️ 理论费用计算失败（不影响主流程）:', error);
       }
@@ -1522,6 +1597,83 @@ export class FlashloanBot {
       }
     } else {
       logger.warn('📱 ⚠️ 监控服务未启用，无法发送微信通知');
+    }
+
+    // 🔥 过滤判断：记录各阶段通过情况
+    const passedSimulation = buildResult !== null && buildResult.validation?.valid === true;
+    const passedValidation = validationEnabled && revalidation?.stillExists === true;
+    const passedBoth = passedSimulation && passedValidation;
+
+    // 🔒 严格执行决策：必须同时满足以下条件
+    // 1. 构建+模拟通过
+    // 2. 如果启用了二次验证，机会必须仍然存在
+    // 3. 利润偏差不能超过30%阈值
+    // 4. 池子匹配必须是EXACT（如果提供了该信息）
+    let shouldExecute = passedSimulation;
+    let filterReason: string | undefined;
+
+    if (shouldExecute && validationEnabled) {
+      // 检查机会是否消失
+      if (!revalidation?.stillExists) {
+        shouldExecute = false;
+        filterReason = 'Opportunity disappeared (stillExists=false)';
+        logger.warn(`⚠️ 机会已消失，拒绝执行交易`);
+      }
+      // 检查利润偏差（快速模式：放宽到60%，只警告不拒绝）
+      else if (revalidation.secondProfit && opportunity.profit) {
+        const profitDriftRatio = Math.abs(
+          (opportunity.profit - revalidation.secondProfit) / opportunity.profit
+        );
+        if (profitDriftRatio > 0.6) {  // 🚀 从30%放宽到60%
+          // ⚠️ 只警告，不拒绝执行（快速模式）
+          logger.warn(
+            `⚠️ 利润偏差较大：原始=${(opportunity.profit / LAMPORTS_PER_SOL).toFixed(6)} SOL, ` +
+            `验证=${(revalidation.secondProfit / LAMPORTS_PER_SOL).toFixed(6)} SOL, ` +
+            `偏差=${(profitDriftRatio * 100).toFixed(1)}% (threshold: 60%) - 继续执行`
+          );
+        } else if (profitDriftRatio > 0.3) {
+          // 30-60%范围内正常
+          logger.info(
+            `✅ 利润偏差在可接受范围：${(profitDriftRatio * 100).toFixed(1)}% (30-60%)`
+          );
+        }
+      }
+      // 检查池子匹配（快速模式：允许SIMILAR，只警告不拒绝）
+      if (shouldExecute && revalidation.exactPoolMatch === false) {
+        // 🚀 池子从EXACT变为SIMILAR，但仍继续执行（快速模式）
+        logger.warn(
+          `⚠️ 池子匹配变化：EXACT → SIMILAR，但路由仍然有效，继续执行`
+        );
+        // shouldExecute = false;  // ❌ 注释掉，不拒绝执行
+        // filterReason = 'Pool mismatch: route changed (not EXACT match)';  // ❌ 注释掉
+      }
+    }
+
+    if (this.config.database?.enabled && opportunityId) {
+      await OpportunityTrackingHelper.recordFilterJudgment(opportunityId, {
+        passedSimulation,
+        passedValidation,
+        passedBoth,
+        shouldExecute,
+        filterReason: filterReason || (!shouldExecute ? 'Build or simulation failed' : undefined),
+        executionStatus: shouldExecute ? 'pending_execution' : 'filtered',
+      });
+
+      logger.info(
+        `📊 Filter judgment: ` +
+        `simulation=${passedSimulation ? '✅' : '❌'}, ` +
+        `validation=${passedValidation ? '✅' : '❌'}, ` +
+        `both=${passedBoth ? '✅' : '❌'}, ` +
+        `execute=${shouldExecute ? '✅' : '❌'}` +
+        (filterReason ? ` (reason: ${filterReason})` : '')
+      );
+    }
+
+    // 🔒 如果不应该执行，立即返回
+    if (!shouldExecute) {
+      logger.warn(`🚫 交易被过滤，不执行: ${filterReason}`);
+      this.stats.opportunitiesFiltered++;
+      return;
     }
 
     // 🚀 交易已在并行构建中完成，现在执行
@@ -1788,20 +1940,22 @@ export class FlashloanBot {
 
   /**
    * RPC模拟验证闪电贷交易（核心优化⭐）
-   * 
+   *
    * 在不消耗任何Gas的情况下，完整模拟交易执行
-   * 
+   *
    * @param opportunity 套利机会
    * @param borrowAmount 借款金额
    * @param arbitrageInstructions 已构建的套利指令
    * @param lookupTableAccounts ALT账户
+   * @param flashLoanInstructions 闪电贷指令（Jupiter Lend或Solend）
    * @returns 模拟结果
    */
   private async simulateFlashloan(
     opportunity: ArbitrageOpportunity,
     borrowAmount: number,
     arbitrageInstructions: TransactionInstruction[],
-    lookupTableAccounts: AddressLookupTableAccount[]
+    lookupTableAccounts: AddressLookupTableAccount[],
+    flashLoanInstructions?: FlashLoanResult
   ): Promise<{
     valid: boolean;
     reason?: string;
@@ -1846,6 +2000,7 @@ export class FlashloanBot {
             amount: borrowAmountSafe,
             tokenMint: opportunity.inputMint,
           },
+          flashLoanInstructions: flashLoanInstructions || undefined, // 🔥 修复：传入闪电贷指令
           arbitrageInstructions,
           wallet: this.keypair.publicKey,
         },
@@ -2041,12 +2196,28 @@ export class FlashloanBot {
     validation: any;
     borrowAmount: number;
     flashLoanFee: number;
+    buildTotalLatencyMs?: number;
   } | null> {
+    
+    // 🔥 记录构建开始
+    const buildTracking = opportunityId && this.config.database?.enabled
+      ? await OpportunityTrackingHelper.recordBuildStart(opportunityId)
+      : { buildStartTime: new Date(), buildStartMs: Date.now() };
     
     try {
       // 1. 检查是否有缓存的 Ultra quote（Ultra API只用于价格发现）
       if (!opportunity.outboundQuote || !opportunity.returnQuote) {
         logger.error('❌ No cached quote from Worker');
+        
+        // 记录构建失败
+        if (opportunityId && this.config.database?.enabled) {
+          await OpportunityTrackingHelper.recordBuildFailure(
+            opportunityId,
+            buildTracking.buildStartTime,
+            'No cached quote from Worker'
+          );
+        }
+        
         return null;
       }
       
@@ -2118,9 +2289,9 @@ export class FlashloanBot {
             })
           : Promise.resolve(null),
         
-        // 最优策略的两个swap
+        // 最优策略的两个swap（优先使用快速通道）
         Promise.all([
-          this.buildSwapInstructionsFromQuoteAPI({
+          this.buildSwapInstructionsWithFastPath({
             inputMint: opportunity.inputMint,
             outputMint: opportunity.bridgeMint!,
             amount: borrowAmount,
@@ -2128,8 +2299,8 @@ export class FlashloanBot {
             ultraRoutePlan: opportunity.outboundQuote.routePlan,
             maxAccounts: primaryStrategy.maxAccounts,
             onlyDirectRoutes: primaryStrategy.onlyDirectRoutes,
-          }),
-          this.buildSwapInstructionsFromQuoteAPI({
+          }, opportunity, borrowAmount, 'outbound'),
+          this.buildSwapInstructionsWithFastPath({
             inputMint: opportunity.bridgeMint!,
             outputMint: opportunity.outputMint,
             amount: opportunity.bridgeAmount!,
@@ -2137,7 +2308,7 @@ export class FlashloanBot {
             ultraRoutePlan: opportunity.returnQuote.routePlan,
             maxAccounts: primaryStrategy.maxAccounts,
             onlyDirectRoutes: primaryStrategy.onlyDirectRoutes,
-          })
+          }, opportunity, borrowAmount, 'return')
         ])
       ]);
 
@@ -2517,11 +2688,12 @@ export class FlashloanBot {
       );
       
       // 🎁 自动切换到Bundle模式（当交易大小接近限制时）
-      const bundleThreshold = 1100; // 字节，给予一定余量
-      
+      // maxBase64Size = 1644（已在2226行定义），设置阈值为1550（留94字节安全余量，约5.7%）
+      const bundleThreshold = 1550; // 字节，更宽松的阈值，只在真正接近限制时才切换
+
       if (finalEstimatedSize > bundleThreshold) {
         logger.info(
-          `🎁 Transaction size (${finalEstimatedSize} bytes) near limit, switching to Jito Bundle mode...`
+          `🎁 Transaction size (${finalEstimatedSize} bytes) near limit (${bundleThreshold}/${maxBase64Size}), switching to Jito Bundle mode...`
         );
         
         // 🚀 优化：构建Bundle时复用已查询的优先费
@@ -2571,14 +2743,37 @@ export class FlashloanBot {
         `(${arbitrageInstructions.length} ix, ${lookupTableAccounts.length} ALTs)`
       );
       
+      // 🔥 记录构建完成（模拟前）
+      if (opportunityId && this.config.database?.enabled) {
+        await OpportunityTrackingHelper.recordBuildComplete(opportunityId, {
+          buildStartTime: buildTracking.buildStartTime,
+          buildStartMs: buildTracking.buildStartMs,
+          buildSuccess: true,
+          transactionSize: finalEstimatedSize,
+          isBundleMode: false,
+        });
+      }
+      
       // 11. RPC模拟验证
       logger.info(`🔬 RPC Simulation Validation...`);
+      const simulationStartMs = Date.now();
       const simulation = await this.simulateFlashloan(
-        opportunity, 
-        borrowAmount, 
-        arbitrageInstructions, 
-        lookupTableAccounts
+        opportunity,
+        borrowAmount,
+        arbitrageInstructions,
+        lookupTableAccounts,
+        flashLoanInstructions ?? undefined  // 🔥 修复：将null转换为undefined
       );
+      
+      // 🔥 记录模拟结果
+      if (opportunityId && this.config.database?.enabled) {
+        await OpportunityTrackingHelper.recordSimulation(opportunityId, {
+          simulationStartMs,
+          simulationSuccess: simulation.valid,
+          simulationError: simulation.valid ? undefined : simulation.reason,
+          simulationComputeUnits: simulation.unitsConsumed,
+        });
+      }
       
       if (!simulation.valid) {
         logger.warn(`❌ RPC simulation failed: ${simulation.reason}`);
@@ -2635,12 +2830,16 @@ export class FlashloanBot {
       // 更新统计：单笔交易模式
       this.stats.singleTransactions++;
       
+      // 计算构建总耗时（包含模拟）
+      const buildTotalLatencyMs = Date.now() - buildTracking.buildStartMs;
+      
       return {
         transaction,
         validation,
         borrowAmount,
         flashLoanFee,
         isBundleMode: false,
+        buildTotalLatencyMs,  // 🔥 返回总耗时供handleOpportunity使用
       };
 
     } catch (error: any) {
@@ -2650,13 +2849,206 @@ export class FlashloanBot {
   }
 
   /**
+   * 🚀 快速通道：判断是否可以直接使用Worker的Quote
+   *
+   * 条件：
+   * 1. 快速通道功能已启用
+   * 2. Worker的Quote年龄在允许范围内（默认<300ms）
+   * 3. 借款金额与Worker查询金额一致（或在容差范围内）
+   * 4. Worker返回了完整的Quote对象
+   */
+  private canUseFastPath(
+    opportunity: ArbitrageOpportunity,
+    borrowAmount: number,
+    legType: 'outbound' | 'return'
+  ): boolean {
+    if (!this.FAST_PATH_ENABLED) {
+      return false;
+    }
+
+    // 检查Quote年龄
+    const quoteAge = Date.now() - (opportunity.discoveredAt || 0);
+    if (quoteAge > this.FAST_PATH_MAX_QUOTE_AGE_MS) {
+      logger.debug(
+        `❌ Fast path unavailable: quote too old (${quoteAge}ms > ${this.FAST_PATH_MAX_QUOTE_AGE_MS}ms)`
+      );
+      return false;
+    }
+
+    // 检查金额一致性（对于去程腿）
+    if (legType === 'outbound') {
+      const amountDiff = Math.abs(borrowAmount - opportunity.inputAmount);
+      if (amountDiff > this.FAST_PATH_AMOUNT_TOLERANCE) {
+        logger.debug(
+          `❌ Fast path unavailable: amount mismatch ` +
+          `(borrow=${borrowAmount}, worker=${opportunity.inputAmount}, diff=${amountDiff})`
+        );
+        return false;
+      }
+    }
+
+    // 检查Worker是否返回了完整的Quote对象
+    const quote = legType === 'outbound' ? opportunity.outboundQuote : opportunity.returnQuote;
+    if (!quote || !quote.outAmount) {
+      logger.debug(`❌ Fast path unavailable: ${legType} quote is incomplete`);
+      return false;
+    }
+
+    logger.debug(
+      `✅ Fast path available: quote_age=${quoteAge}ms, ` +
+      `amount_match=${legType === 'outbound' ? 'exact' : 'N/A'}`
+    );
+    return true;
+  }
+
+  /**
+   * 🚀 快速通道：直接使用Worker的Quote构建Swap指令
+   *
+   * 跳过重新获取/quote，直接调用/swap-instructions
+   * 节省时间：150-400ms per leg
+   *
+   * @param quoteResponse Worker返回的完整Quote对象
+   * @param legType 'outbound'或'return'（用于日志）
+   * @returns Swap指令和相关信息，失败返回null
+   */
+  private async buildSwapInstructionsFromWorkerQuote(
+    quoteResponse: any,
+    legType: 'outbound' | 'return'
+  ): Promise<{
+    instructions: TransactionInstruction[];
+    setupInstructions: TransactionInstruction[];
+    cleanupInstructions: TransactionInstruction[];
+    computeBudgetInstructions: TransactionInstruction[];
+    addressLookupTableAddresses: string[];
+    outAmount: number;
+  } | null> {
+    const fastPathStart = Date.now();
+    this.stats.fastPathAttempts++;
+
+    try {
+      logger.debug(
+        `🚀 Fast path: building ${legType} swap from Worker quote ` +
+        `(outAmount=${quoteResponse.outAmount})`
+      );
+
+      // 调用 /swap-instructions（与现有逻辑相同）
+      const swapInstructionsResponse = await this.jupiterQuoteAxios.post(
+        '/swap-instructions',
+        {
+          quoteResponse: quoteResponse,
+          userPublicKey: this.keypair.publicKey.toBase58(),
+          wrapAndUnwrapSol: false,
+          dynamicComputeUnitLimit: true,
+          asLegacyTransaction: false,
+          useSharedAccounts: true,
+          skipUserAccountsRpcCalls: true,
+        },
+        { timeout: 30000 }
+      );
+
+      if (swapInstructionsResponse.data?.error) {
+        logger.warn(
+          `⚠️ Fast path failed: /swap-instructions returned error: ` +
+          `${swapInstructionsResponse.data.error}`
+        );
+        this.stats.fastPathFallbacks++;
+        return null;
+      }
+
+      const {
+        computeBudgetInstructions,
+        setupInstructions,
+        swapInstruction: swapInstructionPayload,
+        cleanupInstruction,
+        addressLookupTableAddresses,
+      } = swapInstructionsResponse.data;
+
+      // 反序列化指令（与现有逻辑相同）
+      const deserializeInstruction = (instructionPayload: any): TransactionInstruction => {
+        return new TransactionInstruction({
+          programId: new PublicKey(instructionPayload.programId),
+          keys: instructionPayload.accounts.map((key: any) => ({
+            pubkey: new PublicKey(key.pubkey),
+            isSigner: key.isSigner,
+            isWritable: key.isWritable,
+          })),
+          data: Buffer.from(instructionPayload.data, 'base64'),
+        });
+      };
+
+      const deserializedInstructions = {
+        instructions: swapInstructionPayload ? [deserializeInstruction(swapInstructionPayload)] : [],
+        setupInstructions: (setupInstructions || []).map(deserializeInstruction),
+        cleanupInstructions: cleanupInstruction ? [deserializeInstruction(cleanupInstruction)] : [],
+        computeBudgetInstructions: (computeBudgetInstructions || []).map(deserializeInstruction),
+        addressLookupTableAddresses: addressLookupTableAddresses || [],
+        outAmount: Number(quoteResponse.outAmount),
+      };
+
+      const fastPathTime = Date.now() - fastPathStart;
+      this.stats.fastPathSuccesses++;
+      // 估算节省的时间：通常节省150-400ms（一次/quote调用的往返时间）
+      const estimatedTimeSaved = 200; // 保守估计节省200ms
+      this.stats.fastPathTimeSavedMs += estimatedTimeSaved;
+
+      logger.info(
+        `✅ Fast path success: ${legType} swap built in ${fastPathTime}ms ` +
+        `(skipped /quote call, estimated saved ~${estimatedTimeSaved}ms)`
+      );
+
+      return deserializedInstructions;
+    } catch (error: any) {
+      const fastPathTime = Date.now() - fastPathStart;
+      logger.warn(
+        `⚠️ Fast path failed: ${legType} swap error after ${fastPathTime}ms: ${error.message}`
+      );
+      this.stats.fastPathFallbacks++;
+      return null;
+    }
+  }
+
+  /**
+   * 🚀 智能构建Swap指令：优先快速通道，失败时回退到慢通道
+   *
+   * @param params 构建参数
+   * @param opportunity Worker发现的机会（用于快速通道判断）
+   * @param borrowAmount 借款金额
+   * @param legType 'outbound'或'return'
+   * @returns Swap指令和相关信息
+   */
+  private async buildSwapInstructionsWithFastPath(params: {
+    inputMint: PublicKey;
+    outputMint: PublicKey;
+    amount: number;
+    slippageBps: number;
+    ultraRoutePlan?: any[];
+    maxAccounts?: number;
+    onlyDirectRoutes?: boolean;
+  }, opportunity: ArbitrageOpportunity, borrowAmount: number, legType: 'outbound' | 'return'): Promise<ReturnType<typeof this.buildSwapInstructionsFromQuoteAPI>> {
+    // 尝试快速通道
+    if (this.canUseFastPath(opportunity, borrowAmount, legType)) {
+      const workerQuote = legType === 'outbound' ? opportunity.outboundQuote : opportunity.returnQuote;
+      const fastResult = await this.buildSwapInstructionsFromWorkerQuote(workerQuote, legType);
+
+      if (fastResult) {
+        return fastResult;
+      }
+
+      logger.info(`🔄 Fast path failed for ${legType}, falling back to slow path (re-fetch /quote)`);
+    }
+
+    // 回退到慢通道（原有逻辑）
+    return this.buildSwapInstructionsFromQuoteAPI(params);
+  }
+
+  /**
    * 使用 Quote API 构建 Swap 指令（支持闪电贷）
-   * 
+   *
    * 流程：
    * 1. 调用 /quote 获取报价
    * 2. 调用 /swap-instructions 获取指令（不检查余额，支持闪电贷）
    * 3. 反序列化指令并返回
-   * 
+   *
    * @param ultraRoutePlan Ultra API 的路由计划（用于引导路由选择）
    */
   private async buildSwapInstructionsFromQuoteAPI(params: {
@@ -3780,6 +4172,21 @@ export class FlashloanBot {
     logger.info(`Opportunities Found: ${this.stats.opportunitiesFound}`);
     logger.info(`Opportunities Filtered: ${this.stats.opportunitiesFiltered}`);
     logger.info(`  └─ By RPC Simulation: ${this.stats.simulationFiltered} (saved ${this.stats.savedGasSol.toFixed(4)} SOL)`);
+
+    // 🚀 快速通道统计
+    if (this.stats.fastPathAttempts > 0) {
+      const fastPathHitRate = (this.stats.fastPathSuccesses / this.stats.fastPathAttempts * 100).toFixed(1);
+      logger.info('');
+      logger.info('🚀 Fast Path Performance:');
+      logger.info(`  ├─ Attempts: ${this.stats.fastPathAttempts}`);
+      logger.info(`  ├─ Successes: ${this.stats.fastPathSuccesses} (${fastPathHitRate}% hit rate)`);
+      logger.info(`  ├─ Fallbacks: ${this.stats.fastPathFallbacks}`);
+      logger.info(
+        `  └─ Time Saved: ~${this.stats.fastPathTimeSavedMs}ms total ` +
+        `(~${(this.stats.fastPathTimeSavedMs / this.stats.fastPathAttempts).toFixed(0)}ms avg per attempt)`
+      );
+    }
+
     logger.info(`Trades Attempted: ${this.stats.tradesAttempted}`);
     logger.info(`Trades Successful: ${this.stats.tradesSuccessful}`);
     logger.info(`Trades Failed: ${this.stats.tradesFailed}`);

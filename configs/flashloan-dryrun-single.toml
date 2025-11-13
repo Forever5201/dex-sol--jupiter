@@ -75,7 +75,7 @@ only_direct_routes = false
 mints_file = "mints-simple.txt"
 worker_count = 1  # 🔥 单 Worker
 query_interval_ms = 2000  # 🔥 2秒间隔 = 1 req/s (符合限制)
-min_profit_lamports = 5_000_000
+min_profit_lamports = 5_000_000  # 🚀 测试阶段：0.005 SOL (降低阈值，发现更多机会)
 slippage_bps = 50
 
 [opportunity_finder.flashloan_filter]
@@ -130,5 +130,15 @@ use_lut = true
 preload_common_accounts = true
 include_dex_accounts = true
 include_lending_accounts = true
+
+# ========================================
+# 数据库配置 (机会追踪)
+# ========================================
+[database]
+enabled = true  # 🔥 启用数据库记录
+# url 从 .env 文件的 DATABASE_URL 环境变量读取，不在此明文配置
+log_queries = false  # 关闭SQL查询日志以减少噪音
+pool_size = 5
+connection_timeout = 10000
 
 

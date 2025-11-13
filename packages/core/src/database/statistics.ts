@@ -216,9 +216,9 @@ export class DatabaseStatistics {
       });
 
       const totalTrades = trades.length;
-      const successfulTrades = trades.filter(t => t.status === 'success').length;
+      const successfulTrades = trades.filter((t: any) => t.status === 'success').length;
       const successRate = totalTrades > 0 ? (successfulTrades / totalTrades) * 100 : 0;
-      const totalNetProfit = trades.reduce((sum, t) => sum + t.netProfit, 0n);
+      const totalNetProfit = trades.reduce((sum: bigint, t: any) => sum + t.netProfit, 0n);
       const avgProfitPerTrade = totalTrades > 0 ? totalNetProfit / BigInt(totalTrades) : 0n;
 
       await db.tokenStatistic.upsert({
@@ -361,7 +361,7 @@ export class DatabaseStatistics {
         { min: 100, max: Infinity, count: 0 },
       ];
 
-      trades.forEach(trade => {
+      trades.forEach((trade: any) => {
         const roi = Number(trade.roi || 0);
         const range = ranges.find(r => roi >= r.min && roi < r.max);
         if (range) {
@@ -402,7 +402,7 @@ export class DatabaseStatistics {
         },
       });
 
-      return routes.map(r => ({
+      return routes.map((r: any) => ({
         dexName: r.dexName,
         totalTrades: r._count,
         totalVolume: BigInt(r._sum.inputAmount || 0),

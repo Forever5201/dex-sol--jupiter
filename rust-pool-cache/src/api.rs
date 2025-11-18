@@ -262,7 +262,7 @@ async fn scan_validated(
     let (valid_opps, _invalid_opps, stats) = validator.validate_batch(opportunities, amount);
     
     // 🎯 阶段3：链上模拟验证（可选，仅高置信度机会）
-    let (final_opps, simulated_count) = if let Some(simulator) = &state.simulator {
+    let (final_opps, _simulated_count) = if let Some(simulator) = &state.simulator {
         // 并发验证所有高置信度机会
         let verified = simulator.verify_batch(valid_opps.clone()).await;
         let count = verified.len();

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast;
+use dashmap::DashMap;
 
 use crate::state_layer::StateLayer;
 
@@ -66,7 +67,7 @@ impl PoolPrice {
 
 /// Thread-safe price cache
 pub struct PriceCache {
-    prices: Arc<RwLock<HashMap<String, PoolPrice>>>,
+    prices: Arc<DashMap<String, PoolPrice>>,
     update_tx: broadcast::Sender<PriceUpdateEvent>,
 }
 
@@ -74,7 +75,7 @@ impl PriceCache {
     pub fn new() -> Self {
         let (update_tx, _) = broadcast::channel(1000);
         Self {
-            prices: Arc::new(RwLock::new(HashMap::new())),
+            prices: Arc::new(DashMap::new()),
             update_tx,
         }
     }
@@ -87,10 +88,9 @@ impl PriceCache {
     /// Update price for a pool
     pub fn update_price(&self, pool_price: PoolPrice) {
         let event = {
-            let mut prices = self.prices.write().unwrap();
-            let old_price = prices.get(&pool_price.pool_id).map(|p| p.price);
+            let old_price = self.prices.get(&pool_price.pool_id).map(|p| p.price);
             let new_price = pool_price.price;
-            
+
             let price_change_percent = if let Some(old) = old_price {
                 // 🔥 过滤无效价格：如果新价格或旧价格为0，不触发变化事件
                 if new_price == 0.0 || old == 0.0 {
@@ -116,9 +116,9 @@ impl PriceCache {
                     100.0  // 首次更新且价格有效，触发扫描
                 }
             };
-            
-            prices.insert(pool_price.pool_id.clone(), pool_price.clone());
-            
+
+            self.prices.insert(pool_price.pool_id.clone(), pool_price.clone());
+
             PriceUpdateEvent {
                 pool_id: pool_price.pool_id,
                 pair: pool_price.pair,
@@ -128,34 +128,29 @@ impl PriceCache {
                 timestamp: Instant::now(),
             }
         };
-        
+
         // Send event (ignore if no receivers)
         let _ = self.update_tx.send(event);
     }
     
-    /// Get price for a specific pool    
+    /// Get price for a specific pool
     #[allow(dead_code)]
     pub fn get_price(&self, pool_id: &str) -> Option<PoolPrice> {
-        let prices = self.prices.read().unwrap();
-        prices.get(pool_id).cloned()
+        self.prices.get(pool_id).map(|entry| entry.clone())
     }
     
     /// Get all pools for a specific pair
     pub fn get_pools_by_pair(&self, pair: &str) -> Vec<PoolPrice> {
-        let prices = self.prices.read().unwrap();
-        prices
-            .values()
-            .filter(|p| p.pair == pair)
-            .cloned()
+        self.prices.iter()
+            .filter(|entry| entry.pair == pair)
+            .map(|entry| entry.clone())
             .collect()
     }
     
     /// Get the age (in milliseconds) of the latest price update for a pool
     pub fn get_price_age_ms(&self, pool_id: &str) -> Option<u128> {
-        let prices = self.prices.read().unwrap();
-        prices
-            .get(pool_id)
-            .map(|p| p.last_update.elapsed().as_millis())
+        self.prices.get(pool_id)
+            .map(|entry| entry.last_update.elapsed().as_millis())
     }
 
     /// Determine whether a pool's cached price is stale
@@ -168,21 +163,18 @@ impl PriceCache {
 
     /// Get all cached prices
     pub fn get_all_prices(&self) -> Vec<PoolPrice> {
-        let prices = self.prices.read().unwrap();
-        prices.values().cloned().collect()
+        self.prices.iter()
+            .map(|entry| entry.clone())
+            .collect()
     }
     
     /// Get statistics
     pub fn get_stats(&self) -> (usize, Vec<String>) {
-        let prices = self.prices.read().unwrap();
-        let pairs: Vec<String> = prices
-            .values()
-            .map(|p| p.pair.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
+        let pairs: std::collections::HashSet<String> = self.prices.iter()
+            .map(|entry| entry.pair.clone())
             .collect();
-        
-        (prices.len(), pairs)
+
+        (self.prices.len(), pairs.into_iter().collect())
     }
     
     // ============================================
@@ -190,154 +182,148 @@ impl PriceCache {
     // ============================================
     
     /// 获取新鲜数据 - 只返回在指定时间内更新的数据
-    /// 
+    ///
     /// # Arguments
     /// * `max_age_ms` - 最大数据年龄（毫秒）
-    /// 
+    ///
     /// # Returns
     /// 新鲜的池子价格列表
-    /// 
+    ///
     /// # Example
     /// ```
     /// // 只获取500ms内更新的数据
     /// let fresh_prices = price_cache.get_fresh_prices(500);
     /// ```
     pub fn get_fresh_prices(&self, max_age_ms: u64) -> Vec<PoolPrice> {
-        let prices = self.prices.read().unwrap();
         let now = Instant::now();
-        
-        prices.values()
-            .filter(|p| {
-                let age_ms = now.duration_since(p.last_update).as_millis() as u64;
+
+        self.prices.iter()
+            .filter(|entry| {
+                let age_ms = now.duration_since(entry.last_update).as_millis() as u64;
                 age_ms <= max_age_ms
             })
-            .cloned()
+            .map(|entry| entry.clone())
             .collect()
     }
     
     /// 获取slot对齐的一致性快照 - Jupiter级别的数据一致性
-    /// 
+    ///
     /// 只返回与最新slot时间差在阈值内的数据，确保所有数据来自相近的区块
-    /// 
+    ///
     /// # Arguments
     /// * `max_slot_spread` - 允许的最大slot差异
-    /// 
+    ///
     /// # Returns
     /// Slot对齐的价格快照
-    /// 
+    ///
     /// # Example
     /// ```
     /// // 获取slot差异<5的一致性数据
     /// let snapshot = price_cache.get_slot_aligned_snapshot(5);
     /// ```
     pub fn get_slot_aligned_snapshot(&self, max_slot_spread: u64) -> Vec<PoolPrice> {
-        let prices = self.prices.read().unwrap();
-        
         // 找到最新的slot
-        let latest_slot = prices.values()
-            .map(|p| p.slot)
+        let latest_slot = self.prices.iter()
+            .map(|entry| entry.slot)
             .max()
             .unwrap_or(0);
-        
+
         if latest_slot == 0 {
             return Vec::new();
         }
-        
+
         // 只返回与最新slot差异 <= max_slot_spread 的数据
-        prices.values()
-            .filter(|p| {
-                let slot_diff = latest_slot.saturating_sub(p.slot);
+        self.prices.iter()
+            .filter(|entry| {
+                let slot_diff = latest_slot.saturating_sub(entry.slot);
                 slot_diff <= max_slot_spread
             })
-            .cloned()
+            .map(|entry| entry.clone())
             .collect()
     }
     
     /// 组合方法：获取新鲜且slot对齐的数据 - 最强一致性保证
-    /// 
+    ///
     /// # Arguments
     /// * `max_age_ms` - 最大数据年龄（毫秒）
     /// * `max_slot_spread` - 允许的最大slot差异
-    /// 
+    ///
     /// # Returns
     /// 同时满足时间新鲜度和slot一致性的数据
     pub fn get_consistent_snapshot(&self, max_age_ms: u64, max_slot_spread: u64) -> Vec<PoolPrice> {
-        let prices = self.prices.read().unwrap();
         let now = Instant::now();
-        
+
         // 找到最新的slot
-        let latest_slot = prices.values()
-            .map(|p| p.slot)
+        let latest_slot = self.prices.iter()
+            .map(|entry| entry.slot)
             .max()
             .unwrap_or(0);
-        
+
         if latest_slot == 0 {
             return Vec::new();
         }
-        
+
         // 同时过滤时间和slot
-        prices.values()
-            .filter(|p| {
+        self.prices.iter()
+            .filter(|entry| {
                 // 检查数据新鲜度
-                let age_ms = now.duration_since(p.last_update).as_millis() as u64;
+                let age_ms = now.duration_since(entry.last_update).as_millis() as u64;
                 if age_ms > max_age_ms {
                     return false;
                 }
-                
+
                 // 检查slot对齐
-                let slot_diff = latest_slot.saturating_sub(p.slot);
+                let slot_diff = latest_slot.saturating_sub(entry.slot);
                 slot_diff <= max_slot_spread
             })
-            .cloned()
+            .map(|entry| entry.clone())
             .collect()
     }
     
     /// 获取当前最新的slot号
     pub fn get_latest_slot(&self) -> u64 {
-        let prices = self.prices.read().unwrap();
-        prices.values()
-            .map(|p| p.slot)
+        self.prices.iter()
+            .map(|entry| entry.slot)
             .max()
             .unwrap_or(0)
     }
     
     /// 获取数据质量统计 - 用于监控和调试
-    /// 
+    ///
     /// # Returns
     /// (总池子数, 新鲜数据数, slot对齐数, 平均数据年龄ms, slot分布)
     pub fn get_data_quality_stats(&self) -> (usize, usize, usize, u64, HashMap<u64, usize>) {
-        let prices = self.prices.read().unwrap();
         let now = Instant::now();
-        let total = prices.len();
-        
+        let total = self.prices.len();
+
         // 统计新鲜数据（<2秒）
-        let fresh_count = prices.values()
-            .filter(|p| now.duration_since(p.last_update).as_secs() < 2)
+        let fresh_count = self.prices.iter()
+            .filter(|entry| now.duration_since(entry.last_update).as_secs() < 2)
             .count();
-        
+
         // 找最新slot
-        let latest_slot = prices.values()
-            .map(|p| p.slot)
+        let latest_slot = self.prices.iter()
+            .map(|entry| entry.slot)
             .max()
             .unwrap_or(0);
-        
+
         // 统计slot对齐数据（与最新slot差异<5）
-        let aligned_count = prices.values()
-            .filter(|p| latest_slot.saturating_sub(p.slot) < 5)
+        let aligned_count = self.prices.iter()
+            .filter(|entry| latest_slot.saturating_sub(entry.slot) < 5)
             .count();
-        
+
         // 计算平均年龄
-        let total_age: u128 = prices.values()
-            .map(|p| now.duration_since(p.last_update).as_millis())
+        let total_age: u128 = self.prices.iter()
+            .map(|entry| now.duration_since(entry.last_update).as_millis())
             .sum();
         let avg_age = if total > 0 { (total_age / total as u128) as u64 } else { 0 };
-        
+
         // Slot分布
         let mut slot_distribution: HashMap<u64, usize> = HashMap::new();
-        for p in prices.values() {
-            *slot_distribution.entry(p.slot).or_insert(0) += 1;
+        for entry in self.prices.iter() {
+            *slot_distribution.entry(entry.slot).or_insert(0) += 1;
         }
-        
+
         (total, fresh_count, aligned_count, avg_age, slot_distribution)
     }
 }

@@ -57,12 +57,18 @@ fn default_true() -> bool {
 pub struct PoolConfig {
     pub address: String,
     pub name: String,
+    #[serde(default = "default_pair")]
+    pub pair: String,
     #[serde(default = "default_pool_type")]
     pub pool_type: String,
 }
 
 fn default_pool_type() -> String {
     "amm_v4".to_string()
+}
+
+fn default_pair() -> String {
+    "UNKNOWN/UNKNOWN".to_string()
 }
 
 /// Logging configuration

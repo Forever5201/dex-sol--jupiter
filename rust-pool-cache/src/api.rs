@@ -12,7 +12,7 @@ use crate::arbitrage::{scan_for_arbitrage, ArbitrageOpportunity};
 use crate::error_tracker::ErrorTracker;
 use crate::price_cache::PriceCache;
 use crate::opportunity_validator::{OpportunityValidator, ValidationResult};
-use crate::lst_arbitrage::{LstArbitrageDetector, LstDiscountOpportunity};  // 🔥 LST套利
+use crate::lst_arbitrage::LstArbitrageDetector;  // 🔥 LST套利
 
 use crate::onchain_simulator::OnChainSimulator;
 
@@ -280,7 +280,7 @@ async fn scan_validated(
         (converted, count)
     } else {
         // 无模拟器，直接使用轻量级验证结果
-        let count = valid_opps.len();
+        // let _count = valid_opps.len();  // ⚠️ 未使用变量，临时注释
         (valid_opps, 0)  // simulated_count = 0
     };
     

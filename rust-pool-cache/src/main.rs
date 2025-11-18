@@ -1,6 +1,7 @@
 mod api;
 mod arbitrage;
 mod config;
+mod coordinator;            // 🔥 协调器（混合触发）
 mod database;
 mod dex_interface;
 mod deserializers;
@@ -9,6 +10,8 @@ mod metrics;
 mod pool_factory;
 mod pool_stats;             // 🔥 池子活跃度统计模块
 mod price_cache;
+mod dashmap_state;          // 🔥 DashMap状态层实现
+mod state_layer_factory;    // 🔥 状态层工厂
 mod proxy;
 mod router;
 mod router_bellman_ford;
@@ -16,6 +19,7 @@ mod router_bfs;             // 🔥 BFS路由器
 mod router_split_optimizer;
 mod router_cache;           // 🔥 路径缓存
 mod router_advanced;
+mod state_layer;            // 🔥 通用状态层接口
 mod websocket;
 mod vault_reader;
 mod opportunity_validator;  // 🎯 套利机会验证器
@@ -25,12 +29,19 @@ mod lst_arbitrage;          // 🔥 LST折价套利模块（旧版）
 mod stake_pool_reader;      // 🔥 Stake Pool实时数据读取（新增）
 mod lst_enhanced_detector;  // 🔥 LST增强检测器（新增）
 mod opportunity_merger;     // 🔥 机会合并与去重（新增）
+mod mint_decimals_cache;
 
 use anyhow::Result;
+use solana_client::rpc_client::RpcClient;
+use solana_sdk::commitment_config::CommitmentConfig;
+use solana_sdk::pubkey::Pubkey;
 use std::env;
 use std::sync::Arc;
-use tokio::time::{interval, Duration};
-use tracing::{info, error, warn};
+use std::time::Instant;
+use tokio::time::{interval, sleep, Duration};
+use tokio::task;
+use tokio::sync::mpsc;
+use tracing::{info, error, warn, debug};
 use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
@@ -41,10 +52,103 @@ use metrics::MetricsCollector;
 use price_cache::PriceCache;
 use router_advanced::{AdvancedRouter, AdvancedRouterConfig, RouterMode};
 use websocket::WebSocketClient;
+use crate::mint_decimals_cache::init_global_mint_cache;
+use crate::pool_factory::PoolFactory;
+use crate::price_cache::PoolPrice;
 
 use crate::stake_pool_reader::StakePoolReader;
 use crate::lst_enhanced_detector::{LstEnhancedDetector, LstDetectorConfig};
 use crate::opportunity_merger::OpportunityMerger;
+use crate::config::PoolConfig;
+use std::str::FromStr;
+
+// Phoenix pool refresh worker (moved outside main function)
+async fn phoenix_refresh_worker(
+    pools: Vec<PoolConfig>,
+    rpc_url: String,
+    price_cache: Arc<PriceCache>,
+) {
+    const STALE_THRESHOLD_MS: u64 = 3000;
+    const MIN_REFRESH_INTERVAL_SECS: u64 = 5;
+    const FULL_REFRESH_TICKS: u64 = 6; // 6 * 5s ≈ 30s (legacy cadence)
+
+    let rpc_client = Arc::new(RpcClient::new_with_commitment(
+        rpc_url.clone(),
+        CommitmentConfig::confirmed(),
+    ));
+
+    let mut tick_counter: u64 = 0;
+
+    loop {
+        tick_counter = tick_counter.wrapping_add(1);
+        let force_refresh = tick_counter % FULL_REFRESH_TICKS == 0;
+
+        for pool in &pools {
+            if !pool.pool_type.to_lowercase().contains("phoenix") {
+                continue;
+            }
+
+            let is_stale = price_cache.is_price_stale(&pool.address, STALE_THRESHOLD_MS);
+            if !is_stale && !force_refresh {
+                continue;
+            }
+
+            let pubkey = match Pubkey::from_str(&pool.address) {
+                Ok(key) => key,
+                Err(e) => {
+                    warn!("Invalid Phoenix pubkey {}: {}", pool.address, e);
+                    continue;
+                }
+            };
+
+            let rpc_clone = rpc_client.clone();
+            match task::spawn_blocking(move || {
+                rpc_clone.get_account_with_commitment(&pubkey, CommitmentConfig::confirmed())
+            })
+            .await
+            {
+                Ok(Ok(response)) => {
+                    if let Some(account) = response.value {
+                        match PoolFactory::create_pool(&pool.pool_type, &account.data) {
+                            Ok(pool_state) => {
+                                let price = pool_state.calculate_price();
+                                if price == 0.0 {
+                                    continue;
+                                }
+                                let (base_reserve, quote_reserve) = pool_state.get_reserves();
+                                let (base_decimals, quote_decimals) = pool_state.get_decimals();
+                                let pool_price = PoolPrice {
+                                    pool_id: pool.address.clone(),
+                                    dex_name: pool_state.dex_name().to_string(),
+                                    pair: pool.pair.clone(),  // 🔥 FIX: 使用 pair 而不是 name
+                                    price,
+                                    base_reserve: base_reserve as u64,
+                                    quote_reserve: quote_reserve as u64,
+                                    base_decimals,
+                                    quote_decimals,
+                                    last_update: std::time::Instant::now(),
+                                    slot: response.context.slot,
+                                };
+                                price_cache.update_price(pool_price);
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse Phoenix pool {}: {}", pool.address, e);
+                            }
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!("RPC error for Phoenix pool {}: {}", pool.address, e);
+                }
+                Err(e) => {
+                    warn!("Task join error for Phoenix pool {}: {}", pool.address, e);
+                }
+            }
+        }
+
+        sleep(Duration::from_secs(MIN_REFRESH_INTERVAL_SECS)).await;
+    }
+}
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
@@ -68,7 +172,7 @@ async fn main() -> Result<()> {
     for pool in config.pools() {
         info!("  - {} ({})", pool.name, pool.address);
     }
-    
+
     // Display proxy configuration
     if let Some(proxy) = &config.proxy {
         if proxy.enabled {
@@ -88,6 +192,14 @@ async fn main() -> Result<()> {
     
     // Initialize price cache
     let price_cache = Arc::new(PriceCache::new());
+    
+    // Initialize global mint decimals cache (used by WhirlpoolState price calculation)
+    let rpc_url_for_mints = config.initialization
+        .as_ref()
+        .and_then(|init| init.rpc_urls.first())
+        .map(|s| s.as_str())
+        .unwrap_or("https://api.mainnet-beta.solana.com");
+    init_global_mint_cache(rpc_url_for_mints);
     
     // 🚀 Initialize pools proactively (if enabled)
     if let Some(init_config) = &config.initialization {
@@ -136,7 +248,7 @@ async fn main() -> Result<()> {
                                         price_cache.update_price(price_cache::PoolPrice {
                                             pool_id: pool_config.address.clone(),
                                             dex_name: pool.dex_name().to_string(),
-                                            pair: pool_config.name.clone(),
+                                            pair: pool_config.pair.clone(),  // 🔥 FIX: 使用 pair 而不是 name
                                             base_reserve,
                                             quote_reserve,
                                             base_decimals,
@@ -237,6 +349,34 @@ async fn main() -> Result<()> {
         println!("   Database: not configured");
         None
     };
+
+    // 🚨 Phoenix价格刷新 - 防止WebSocket长时间无更新导致价格陈旧
+    let phoenix_pools: Vec<PoolConfig> = config
+        .pools()
+        .iter()
+        .cloned()
+        .filter(|p| p.pool_type.to_lowercase().contains("phoenix"))
+        .collect();
+
+    let phoenix_refresh_handle = if !phoenix_pools.is_empty() {
+        if let Some(rpc_url) = config
+            .initialization
+            .as_ref()
+            .and_then(|init| init.rpc_urls.first())
+            .cloned()
+        {
+            println!("🛰️  Starting Phoenix price refresher ({} pools)...", phoenix_pools.len());
+            let price_cache_clone = price_cache.clone();
+            Some(tokio::spawn(async move {
+                phoenix_refresh_worker(phoenix_pools, rpc_url, price_cache_clone).await;
+            }))
+        } else {
+            warn!("Phoenix pools configured but no RPC URL available for refresher");
+            None
+        }
+    } else {
+        None
+    };
     println!();
     
     // 🔥 Initialize StakePoolReader for LST Enhanced Detector
@@ -312,14 +452,33 @@ async fn main() -> Result<()> {
         .map(|l| l.price_change_threshold_percent)
         .unwrap_or(1.0);
     
-    // Initialize WebSocket client
+    // 🔥 Initialize Coordinator (混合触发模型 + 计算风暴防护)
+    println!("\n🎯 Initializing Coordinator...");
+    let (event_tx, event_rx) = mpsc::channel(1024);  // 事件channel（高容量）
+    let (calc_tx, calc_rx) = mpsc::channel(1);       // 计算任务channel（容量1，防止堆积）
+
+    let coordinator_config = coordinator::CoordinatorConfig {
+        tick_interval_ms: 100,          // 100ms时钟兜底扫描
+        high_threshold_percent: 0.2,     // 0.2%价格变化触发快速扫描
+        cooldown_ms: 20,                 // 20ms冷却防抖动
+        event_channel_capacity: 1024,
+        calc_channel_capacity: 1,
+    };
+
+    let coordinator = coordinator::Coordinator::new(coordinator_config, event_rx, calc_tx);
+    let coordinator_handle = tokio::spawn(async move {
+        info!("🎯 Coordinator task started");
+        coordinator.run().await;
+    });
+
+    // 🔥 Initialize WebSocket client (with Coordinator event sender)
     info!("Initializing WebSocket client...");
-    
+
     // 🚀 获取RPC URL用于主动查询vault
     let rpc_url_for_vault = config.initialization
         .as_ref()
         .and_then(|init| init.rpc_urls.first().cloned());
-    
+
     let ws_client = WebSocketClient::new(
         config.websocket_url().to_string(),
         metrics.clone(),
@@ -329,6 +488,11 @@ async fn main() -> Result<()> {
         price_change_threshold,
         rpc_url_for_vault, // 🚀 传入RPC URL用于主动触发vault订阅
     );
+
+    // 🔥 Register Coordinator sender with WebSocket client
+    ws_client.set_coordinator_sender(event_tx);
+
+    info!("✅ WebSocket client configured with Coordinator");
     
     // 🔥 Get pool stats collector before moving ws_client
     let pool_stats = ws_client.pool_stats();
@@ -371,7 +535,64 @@ async fn main() -> Result<()> {
     } else {
         AdvancedRouterConfig::default()
     };
-    
+
+    // 🔥 Initialize Coordinator and Calculator channels
+    println!("\n🎯 Initializing Coordinator and Calculator channels...");
+    let (event_tx, event_rx) = mpsc::channel(1024);  // 事件channel（高容量）
+    let (calc_tx, mut calc_rx) = mpsc::channel(1);   // 计算任务channel（容量1，防止堆积）
+    info!("   └─ Event channel capacity: 1024");
+    info!("   └─ Calculation channel capacity: 1 (prevents task堆积)");
+
+    // 🔥 Initialize Coordinator (mix trigger + storm protection)
+    println!("\n🎯 Initializing Coordinator...");
+    let coordinator_config = coordinator::CoordinatorConfig {
+        tick_interval_ms: 100,          // 100ms clock sweep
+        high_threshold_percent: 0.2,     // 0.2% price change triggers fast scan
+        cooldown_ms: 20,                 // 20ms cooldown anti-jitter
+        event_channel_capacity: 1024,
+        calc_channel_capacity: 1,
+    };
+
+    let coordinator = coordinator::Coordinator::new(coordinator_config, event_rx, calc_tx);
+    let coordinator_handle = tokio::spawn(async move {
+        info!("🎯 Coordinator task started");
+        coordinator.run().await;
+    });
+
+    // 🔥 Initialize Calculator task (listens to calc_rx, executes scans)
+    println!("\n🧮 Starting Calculator task...");
+    let calculator_router = Arc::new(AdvancedRouter::new(price_cache.clone(), router_config.clone()));
+    let calculator_handle = tokio::spawn(async move {
+        info!("🧮 Calculator task started, waiting for tasks from Coordinator...");
+
+        while let Some(task) = calc_rx.recv().await {
+            debug!("🧮 Received calculation task: {:?} from {}", task.trigger_type, task.trigger_source);
+
+            // Only scan if there's a trigger
+            let sol_amount = 10.0;
+            let sol_price = 140.0;
+            let initial_amount_usd = sol_amount * sol_price;
+
+            info!("🔍 Starting arbitrage scan (triggered by: {})", task.trigger_source);
+
+            // Run router scan
+            let paths = calculator_router.find_optimal_routes(initial_amount_usd).await;
+
+            let total_paths = paths.len();
+            info!("⏱️  Scan completed, found {} opportunities", total_paths);
+
+            // Log or process opportunities here
+            if !paths.is_empty() {
+                println!("\n🔥 Found {} arbitrage opportunities!", total_paths);
+                for (idx, path) in paths.iter().enumerate() {
+                    println!("   Opportunity #{}: {:.4}% ROI", idx + 1, path.optimized_roi);
+                }
+            }
+        }
+
+        info!("🧮 Calculator task shutdown (calc_rx closed)");
+    });
+
     let arbitrage_handle = if config.router.as_ref()
         .and_then(|r| r.event_driven.as_ref())
         .map(|e| e.enabled)
@@ -379,362 +600,28 @@ async fn main() -> Result<()> {
     {
         // 🎯 Event-driven mode
         let event_config = config.router.as_ref().unwrap().event_driven.as_ref().unwrap().clone();
-        
+
         let stake_pool_reader_for_task = stake_pool_reader.clone();
-        
+
         tokio::spawn(async move {
-            let advanced_router = Arc::new(AdvancedRouter::new(price_cache_clone.clone(), router_config.clone()));
-            
-            // 🔥 创建LST增强检测器（新版）
-            let lst_detector = if let Some(reader) = stake_pool_reader_for_task {
-                let detector_config = LstDetectorConfig {
-                    min_discount_percent: 0.3,
-                    enable_triangle_arbitrage: true,
-                    enable_multi_lst_arbitrage: true,
-                    enable_redemption_path: true,
-                    marinade_unstake_fee: 0.003,
-                    jito_unstake_fee: 0.001,
-                };
-                
-                Some(LstEnhancedDetector::new(
-                    price_cache_clone.clone(),
-                    reader,
-                    detector_config,
-                ))
-            } else {
-                None
-            };
-            
-            // 创建机会合并器
-            let opportunity_merger = OpportunityMerger::new();
-            
-            println!("🎯 Event-Driven Router initialized:");
-            println!("   Mode: {:?}", router_config.mode);
-            println!("   Min ROI: {}%", router_config.min_roi_percent);
-            println!("   Max hops: {}", router_config.max_hops);
-            println!("   Split optimization: {}", router_config.enable_split_optimization);
-            println!("   Debounce: {}ms", event_config.debounce_ms);
-            println!("   Trigger threshold: {}%", event_config.price_change_threshold_percent);
-            println!("   Validation: {}", event_config.validation_strategy);
-            println!("   Max concurrent: {}", event_config.max_concurrent_scans);
-            println!("   Algorithms: Bellman-Ford + Dynamic Programming + Quick Scan");
-            println!("   Expected coverage: 100% opportunities, 100% profit");
-            
-            if lst_detector.is_some() {
-                println!("   🔥 LST Enhanced Detector: Enabled ⭐");
-                println!("      - Theoretical rate: Real-time from chain");
-                println!("      - Triangle arbitrage: Enabled (redemption path)");
-                println!("      - Multi-LST arbitrage: Enabled (mSOL vs jitoSOL)");
-                println!("      - Min discount: 0.3%");
-                println!("      - Detection: 4 strategies (cross-DEX + triangle + multi-LST + discount)");
-            } else {
-                println!("   ⚠️  LST Enhanced Detector: Disabled");
-            }
-            println!();
-            
-            let mut update_rx = price_cache_clone.subscribe_updates();
-            let scan_semaphore = Arc::new(tokio::sync::Semaphore::new(event_config.max_concurrent_scans));
-            let mut last_scan_trigger = tokio::time::Instant::now();
-            
-            let mut event_count = 0u64;
-            let mut filtered_count = 0u64;
-            let mut scan_count = 0u64;
-            let mut heartbeat_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-            heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            
+            // 🔥 DEPRECATED: Old event-driven logic disabled - Coordinator and Calculator now handle all triggers
+            info!("⚠️  Legacy event-driven router is DISABLED - Coordinator and Calculator are now handling all triggers");
+
+            // Keep this task alive but do nothing
             loop {
-                // Use select! to handle both events and heartbeat
-                let event = tokio::select! {
-                    // Wait for significant price update
-                    result = update_rx.recv() => {
-                        match result {
-                            Ok(event) => event,
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                                println!("⚠️  Event receiver lagged, skipped {} events", skipped);
-                                continue;
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                eprintln!("❌ Price update channel closed!");
-                                break;
-                            }
-                        }
-                    }
-                    // Heartbeat: print status every 30 seconds
-                    _ = heartbeat_interval.tick() => {
-                        println!("\n💓 Event loop heartbeat:");
-                        println!("   Events processed: {}", event_count);
-                        println!("   Events filtered: {}", filtered_count);
-                        println!("   Scans triggered: {}", scan_count);
-                        println!("   Status: Waiting for significant price changes (>{:.2}%)...\n", 
-                            event_config.price_change_threshold_percent);
-                        
-                        // 🔥 Print pool activity summary
-                        pool_stats.print_per_minute_stats();
-                        pool_stats.print_summary(60);
-                        
-                        // 🔥 LST Enhanced Detector heartbeat
-                        if let Some(ref detector) = lst_detector {
-                            println!("\n🔥 LST Enhanced Detector Status:");
-                            
-                            // Display stake pool reader status (from the outer scope via stakepoolreader if available)
-                            // Note: We'll add this info in a different way
-                            
-                            // Run LST-specific scan (every 30 seconds)
-                            let lst_opps: Vec<lst_enhanced_detector::LstOpportunity> = detector.detect_all_opportunities(1000.0);
-                            
-                            if !lst_opps.is_empty() {
-                                let report = detector.generate_report(&lst_opps);
-                                println!("{}", report);
-                            } else {
-                                println!("   No LST opportunities found (threshold: 0.3%)\n");
-                            }
-                        }
-                        
-                        continue;
-                    }
-                };
-                
-                event_count += 1;
-                
-                // 🔍 Log every price update (can be verbose)
-                if event_count % 10 == 0 {
-                    println!("📊 Price update stats: {} total events, {} filtered, {} scans triggered", 
-                        event_count, filtered_count, scan_count);
-                }
-                
-                // Smart trigger: only process significant changes
-                // 🚨 Critical fix: Filter out NaN/Infinity values
-                if !event.price_change_percent.is_finite() || 
-                   event.price_change_percent < event_config.price_change_threshold_percent {
-                    filtered_count += 1;
-                    continue;
-                }
-                        
-                println!("\n🎯 Significant price change detected:");
-                println!("   Pool: {}", event.pool_id);
-                println!("   Change: {:.2}% (threshold: {:.2}%)", 
-                    event.price_change_percent, event_config.price_change_threshold_percent);
-                println!("   Old price: {:?}", event.old_price);
-                println!("   New price: {}", event.new_price);
-                
-                // Debounce: wait for the configured delay
-                tokio::time::sleep(tokio::time::Duration::from_millis(event_config.debounce_ms)).await;
-                
-                // Check if enough time has passed since last scan
-                let elapsed = last_scan_trigger.elapsed();
-                if elapsed < tokio::time::Duration::from_millis(event_config.debounce_ms) {
-                    println!("   ⏭️  Skipped: debounce not satisfied ({}ms < {}ms)", 
-                        elapsed.as_millis(), event_config.debounce_ms);
-                    continue;
-                }
-                
-                last_scan_trigger = tokio::time::Instant::now();
-                
-                // Acquire semaphore to limit concurrent scans
-                if let Ok(permit) = scan_semaphore.clone().try_acquire_owned() {
-                    scan_count += 1;
-                    println!("   ✅ Triggering arbitrage scan #{}", scan_count);
-                    
-                    let router_clone = Arc::clone(&advanced_router);
-                    let db_clone = db_manager_clone.clone();
-                    let router_cfg = router_config.clone();
-                    let validation = event_config.validation_strategy.clone();
-                    let lst_detector_clone = lst_detector.clone();
-                    let merger_clone = opportunity_merger.clone();
-                    let is_lst_event = event.pair.contains("mSOL") || event.pair.contains("jitoSOL");
-                    
-                    // Spawn scan task
-                    tokio::spawn(async move {
-                        let _permit = permit;  // Hold permit until task completes
-                        
-                        let scan_start = tokio::time::Instant::now();
-                        let initial_amount = 1000.0;
-                        
-                        println!("🔍 Starting arbitrage scan...");
-                        println!("   Initial amount: ${}", initial_amount);
-                        println!("   Min ROI: {}%", router_cfg.min_roi_percent);
-                        println!("   Router mode: {:?}", router_cfg.mode);
-                        if is_lst_event {
-                            println!("   🔥 LST-related event: Enhanced detection enabled");
-                        }
-                        
-                        // 1. Run general router scan
-                        let all_paths = router_clone.find_optimal_routes(initial_amount).await;
-                        
-                        // 2. Run LST-specific scan (if enabled and LST-related event or periodic)
-                        let lst_opps: Vec<lst_enhanced_detector::LstOpportunity> = if let Some(ref detector) = lst_detector_clone {
-                            if is_lst_event || scan_count % 6 == 0 {
-                                println!("   🔥 Running LST-specific detection...");
-                                detector.detect_all_opportunities(initial_amount)
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            Vec::new()
-                        };
-                        
-                        let scan_duration = scan_start.elapsed();
-                        
-                        println!("⏱️  Scan completed in {:?}", scan_duration);
-                        println!("📊 Result: {} general + {} LST opportunities", 
-                                 all_paths.len(), lst_opps.len());
-                        
-                        // 3. Merge and deduplicate results
-                        let total_opportunities = all_paths.len() + lst_opps.len();
-                        
-                        if total_opportunities > 0 {
-                            println!("\n🔥 Merging and deduplicating {} total opportunities...", total_opportunities);
-                            
-                            // Convert OptimizedPath to ArbitragePath for merging
-                            let general_arbitrage_paths: Vec<_> = all_paths.iter()
-                                .map(|opt_path| opt_path.base_path.clone())
-                                .collect();
-                            
-                            // Convert LstOpportunity to ArbitragePath (filter out None values)
-                            let lst_arbitrage_paths: Vec<_> = lst_opps.iter()
-                                .filter_map(|opp| opp.to_arbitrage_path())
-                                .collect();
-                            
-                            // Merge results
-                            let merged_opportunities = merger_clone.merge(
-                                general_arbitrage_paths,
-                                lst_opps,
-                            );
-                            
-                            println!("📊 After deduplication: {} unique opportunities\n", merged_opportunities.len());
-                            
-                            // Display merged report
-                            if !merged_opportunities.is_empty() {
-                                let report = merger_clone.format_report(&merged_opportunities);
-                                println!("{}", report);
-                            }
-                        }
-                        
-                        if !all_paths.is_empty() {
-                            println!("\n📋 Detailed opportunity breakdown:\n");
-                            
-                            // Record to database
-                            if let Some(ref db) = db_clone {
-                                let router_mode = format!("{:?}", router_cfg.mode);
-                                for optimized_path in &all_paths {
-                                    if let Ok(db_lock) = db.try_lock() {
-                                        if let Err(e) = db_lock.record_opportunity(
-                                            &optimized_path.base_path,
-                                            &router_mode,
-                                            router_cfg.min_roi_percent
-                                        ).await {
-                                            eprintln!("⚠️ Failed to record opportunity: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            // Validation strategy
-                            match validation.as_str() {
-                                "immediate" => {
-                                    println!("✅ Immediate validation: {} paths", all_paths.len());
-                                }
-                                "none" => {
-                                    // No validation
-                                }
-                                "deferred" => {
-                                    println!("⏳ Deferred validation: {} paths queued", all_paths.len());
-                                }
-                                _ => {}
-                            }
-                            
-                            // Display top 5
-                            for (idx, path) in all_paths.iter().take(5).enumerate() {
-                                println!("{}. {}", idx + 1, router_clone.format_optimized_path(path));
-                            }
-                            
-                            // Select best
-                            if let Some(best) = router_clone.select_best(&all_paths) {
-                                println!("⭐ BEST OPPORTUNITY (Score: {:.2}):", best.score());
-                            }
-                        } else {
-                            println!("❌ No profitable opportunities found");
-                            println!("   Possible reasons:");
-                            println!("   - Market is efficient (no arbitrage gaps > {}%)", router_cfg.min_roi_percent);
-                            println!("   - Price changes too small");
-                            println!("   - Insufficient liquidity in pools");
-                        }
-                    });
-                } else {
-                    println!("   ⏸️  Scan skipped: max concurrent scans reached ({})", event_config.max_concurrent_scans);
-                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                info!("⚠️  Legacy event-driven router task is idle (Coordinator is active)");
             }
         })
     } else {
-        // ⏰ Fallback: timer-based mode
+        // 🎯 Non-event-driven mode - return a dummy handle for compatibility
         tokio::spawn(async move {
-            let mut ticker = interval(Duration::from_secs(5));
-            let advanced_router = AdvancedRouter::new(price_cache_clone.clone(), router_config.clone());
-            
-            println!("⏰ Timer-Based Router initialized (fallback mode):");
-            println!("   Mode: {:?}", router_config.mode);
-            println!("   Min ROI: {}%", router_config.min_roi_percent);
-            println!("   Max hops: {}", router_config.max_hops);
-            println!("   Split optimization: {}", router_config.enable_split_optimization);
-            println!("   Scan interval: 5 seconds");
-            println!("   Algorithms: Bellman-Ford + Dynamic Programming + Quick Scan\n");
-            
-            let mut scan_count = 0u64;
             loop {
-                ticker.tick().await;
-                scan_count += 1;
-                
-                println!("\n⏰ Timer-based scan #{} triggered", scan_count);
-                let scan_start = tokio::time::Instant::now();
-                let initial_amount = 1000.0;
-                
-                println!("🔍 Starting arbitrage scan...");
-                println!("   Initial amount: ${}", initial_amount);
-                println!("   Min ROI: {}%", router_config.min_roi_percent);
-                println!("   Router mode: {:?}", router_config.mode);
-                
-                let all_paths = advanced_router.find_optimal_routes(initial_amount).await;
-                let scan_duration = scan_start.elapsed();
-                
-                println!("⏱️  Scan completed in {:?}", scan_duration);
-                println!("📊 Result: {} opportunities found", all_paths.len());
-                
-                if !all_paths.is_empty() {
-                    println!("\n🔥 Found {} arbitrage opportunities (timer-based):\n", all_paths.len());
-                    
-                    if let Some(ref db) = db_manager_clone {
-                        let router_mode = format!("{:?}", router_config.mode);
-                        for optimized_path in &all_paths {
-                            if let Ok(db_lock) = db.try_lock() {
-                                if let Err(e) = db_lock.record_opportunity(
-                                    &optimized_path.base_path,
-                                    &router_mode,
-                                    router_config.min_roi_percent
-                                ).await {
-                                    eprintln!("⚠️ Failed to record opportunity: {}", e);
-                                }
-                            }
-                        }
-                    }
-                    
-                    for (idx, path) in all_paths.iter().take(5).enumerate() {
-                        println!("{}. {}", idx + 1, advanced_router.format_optimized_path(path));
-                    }
-                    
-                    if let Some(best) = advanced_router.select_best(&all_paths) {
-                        println!("⭐ BEST OPPORTUNITY (Score: {:.2}):", best.score());
-                    }
-                } else {
-                    println!("❌ No profitable opportunities found");
-                    println!("   Possible reasons:");
-                    println!("   - Market is efficient (no arbitrage gaps > {}%)", router_config.min_roi_percent);
-                    println!("   - Price changes too small");
-                    println!("   - Insufficient liquidity in pools");
-                }
+                tokio::time::sleep(Duration::from_secs(3600)).await;
             }
         })
     };
-    
+
     // 🎯 创建链上模拟器（如果配置启用）
     let simulator = if let Some(sim_config) = &config.simulation {
         if sim_config.enabled {
@@ -793,6 +680,13 @@ async fn main() -> Result<()> {
         }
         _ = api_handle => {
             eprintln!("API server terminated");
+        }
+        _ = async {
+            if let Some(handle) = phoenix_refresh_handle {
+                let _ = handle.await;
+            }
+        } => {
+            eprintln!("Phoenix refresher terminated");
         }
         _ = tokio::signal::ctrl_c() => {
             println!("\n\n🛑 Received Ctrl+C, shutting down...");

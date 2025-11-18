@@ -1,9 +1,9 @@
 /**
  * Jupiter查询Worker
- * 
+ *
  * 在独立线程中高频查询Jupiter API
  * 实现真正的环形套利：双向查询（去程 + 回程）
- * 
+ *
  * 🔥 支持本地 Jupiter API（延迟 <5ms）
  */
 
@@ -11,6 +11,7 @@ import { workerData, parentPort } from 'worker_threads';
 import axios from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { UnifiedNetworkAdapter } from '@solana-arb-bot/core'; // 🌐 使用统一网络适配器
+import { PublicKey } from '@solana/web3.js'; // 🔥 方案A: 需要 PublicKey 构建质量数据
 
 // 🚀 Jupiter API 配置（支持本地/远程切换）
 const shouldUseLocalApi = (value?: string | null): boolean => {
@@ -18,10 +19,12 @@ const shouldUseLocalApi = (value?: string | null): boolean => {
   return ['true', '1', 'yes', 'on'].includes(value.toLowerCase());
 };
 
+// 🔥 从配置读取API URL，不再硬编码 (2025-11-15 修复)
+const { workerId, totalWorkers, config } = workerData as WorkerConfig;
 const USE_LOCAL_API = shouldUseLocalApi(process.env.USE_LOCAL_JUPITER_API);
-const JUPITER_API_URL = USE_LOCAL_API 
+const JUPITER_API_URL = USE_LOCAL_API
   ? (process.env.JUPITER_LOCAL_API || 'http://localhost:8080')
-  : 'https://lite-api.jup.ag/swap/v1';  // 🔥 Legacy Swap API (Metis v1引擎)
+  : (config.jupiterApiUrl || 'https://lite-api.jup.ag/swap/v1');  // 使用配置文件中指定的API
 
 const API_ENDPOINT = '/quote';  // 🔥 Legacy Swap API统一使用 /quote
 
@@ -49,7 +52,8 @@ interface BridgeToken {
   description?: string;
 }
 
-const { workerId, totalWorkers, config } = workerData as WorkerConfig;
+// 🔥 从配置读取API URL，不再硬编码 (2025-11-15 修复)
+// Worker 配置已经在上面从 workerData 解构获得
 
 // 🌐 配置代理（使用统一网络适配器）
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
@@ -151,6 +155,64 @@ async function warmupConnections(): Promise<void> {
 interface TokenInfo {
   symbol: string;
   decimals: number;
+}
+
+/**
+ * 构建质量数据接口 (方案A: 选择性构建)
+ * Worker 只为高ROI机会构建质量数据 (ROI > 0.5%)
+ */
+interface BuildQuality {
+  /** 是否构建成功 */
+  success: boolean;
+  /** 构建耗时 (ms) */
+  buildTimeMs: number;
+  /** 指令复杂度: low/medium/high */
+  complexity: 'low' | 'medium' | 'high';
+  /** 去程指令 (序列化后) */
+  outboundInstructions?: any;
+  /** 回程指令 (序列化后) */
+  returnInstructions?: any;
+  /** 模拟结果 */
+  simulation?: {
+    success: boolean;
+    profit: number;
+    logs: string[];
+  };
+  /** 错误信息 (如果失败) */
+  error?: string;
+  /** 路由复杂度评分 (1-10) */
+  routeComplexityScore?: number;
+  /** 估算交易大小 (bytes) */
+  estimatedSize?: number;
+}
+
+/**
+ * 构建质量数据接口 (方案A: 激进构建)
+ * Worker 为每个机会都构建完整质量数据
+ */
+interface BuildQuality {
+  /** 是否构建成功 */
+  success: boolean;
+  /** 构建耗时 (ms) */
+  buildTimeMs: number;
+  /** 指令复杂度: low/medium/high */
+  complexity: 'low' | 'medium' | 'high';
+  /** 去程指令 (序列化后) */
+  outboundInstructions?: any;
+  /** 回程指令 (序列化后) */
+  returnInstructions?: any;
+  /** 模拟结果 */
+  simulation?: {
+    success: boolean;
+    profit: number;
+    logs: string[];
+  };
+  /** 错误信息 (如果失败) */
+  error?: string;
+  /** 路由复杂度评分 (1-10) */
+  routeComplexityScore?: number;
+  /** 估算交易大小 (bytes) */
+  estimatedSize?: number;
 }
 
 /**
@@ -372,7 +434,7 @@ async function queryBridgeArbitrage(
       })()
     ]);
     
-    const parallelLatency = Date.now() - parallelStart;
+    let parallelLatency = Date.now() - parallelStart;  // 🔥 改为 let，因为方案A可能修改它
     const outboundMs = outboundEndTime! - outboundStartTime!;
     const returnMs = returnEndTime! - returnStartTime!;
     
@@ -475,6 +537,57 @@ async function queryBridgeArbitrage(
       `  └─ 利润: ${actualReturnDisplay.toFixed(6)} - ${inputAmountDisplay.toFixed(2)} = ${profitDisplay.toFixed(6)} ${inputTokenInfo.symbol} (比率=${newRatio.toFixed(2)})`
     );
 
+    // 🔥 只在首次发现时输出一次（防止刷屏）
+    if (bridgeStat) {
+      bridgeStat.opportunities++;
+    }
+
+    // 🔥 方案A: 选择性构建 - 只为高 ROI 机会构建质量数据 (ROI > 0.5%)
+    // ROI 已在上面计算: const roi = (profit / inputAmount) * 100;
+    let quality: BuildQuality | undefined = undefined;
+    const roiThreshold = 0.5; // 0.5%
+    if (roi > roiThreshold) { // ROI > 0.5% 才构建
+      const qualityStart = Date.now();
+      console.log(`[Worker ${workerId}] 🏗️ Building quality data for high-ROI opportunity (ROI: ${(roi * 100).toFixed(2)}%)...`);
+
+      quality = await buildQualityData({
+        inputMint: new PublicKey(inputMint),
+        outputMint: new PublicKey(inputMint),
+        bridgeMint: new PublicKey(bridgeToken.mint),
+        inputAmount,
+        profit,
+        outboundQuote: quoteOut,
+        returnQuote: quoteBack,
+      });
+
+      if (quality.success) {
+        console.log(`[Worker ${workerId}] ✅ Quality built in ${quality.buildTimeMs}ms, complexity: ${quality.complexity}, size: ${quality.estimatedSize} bytes`);
+      } else {
+        console.log(`[Worker ${workerId}] ❌ Quality build failed: ${quality.error}`);
+      }
+
+      // 更新延迟数据
+      parallelLatency += (Date.now() - qualityStart);
+    }
+
+    console.log(
+      `\n🎯 [Worker ${workerId}] Opportunity #${opportunitiesFound}:`
+    );
+    console.log(
+      `   Path: ${inputMint.slice(0, 4)}... → ${bridgeToken.symbol} → ${inputMint.slice(0, 4)}...`
+    );
+    console.log(
+      `   Profit: ${profitDisplay.toFixed(6)} ${inputTokenInfo.symbol} (${(roi * 100).toFixed(2)}%)`
+    );
+    if (quality) {
+      console.log(
+        `   Quality: ${quality.success ? '✅' : '❌'} ${quality.complexity} (${quality.buildTimeMs}ms)`
+      );
+    }
+    console.log(
+      `   Query time: ${queryTime}ms`
+    );
+
     return {
       inputMint,
       outputMint: inputMint,  // 环形：输出=输入
@@ -485,11 +598,11 @@ async function queryBridgeArbitrage(
       outputAmount: actualReturnSOL,
       profit,
       roi,
-      discoveredAt: Date.now(),  // 🔥 新增：Worker判断为机会的精确时刻
-      // 🔥 新增：保存完整的Ultra API响应（用于后续直接构建指令）
+      discoveredAt: Date.now(),  // Worker判断为机会的精确时刻
+      // 保存完整的API响应（用于后续直接构建指令）
       outboundQuote: quoteOut,   // 完整的去程报价
       returnQuote: quoteBack,    // 完整的回程报价
-      // 🔥 Ultra API: routePlan 直接在顶层
+      // Ultra API: routePlan 直接在顶层
       outRoute: quoteOut.routePlan || [],
       backRoute: quoteBack.routePlan || [],
       queryTime,
@@ -500,14 +613,16 @@ async function queryBridgeArbitrage(
         outRouter: quoteOut.routePlan?.[0]?.swapInfo?.label,
         backRouter: quoteBack.routePlan?.[0]?.swapInfo?.label,
       },
-      // 🔥 新增：详细延迟数据（用于性能分析）
+      // 详细延迟数据（用于性能分析）
       latency: {
         parallelMs: parallelLatency,
-        outboundMs: outboundMs,      // 🔥 新增：去程延迟
-        returnMs: returnMs,          // 🔥 新增：回程延迟
+        outboundMs: outboundMs,      // 去程延迟
+        returnMs: returnMs,          // 回程延迟
         estimatedBridgeAmount,
         actualBridgeAmount,
       },
+      // 🔥 方案A: 包含质量数据（高 ROI 机会）
+      quality,
     };
 
   } catch (error: any) {
@@ -728,6 +843,201 @@ async function scanLoop(): Promise<void> {
     // 🔥 关键修复：每轮扫描后延迟（避免API限流）
     // 这样可以确保无论查询成功失败，都按照配置的间隔进行查询
     await sleep(config.queryIntervalMs);
+  }
+}
+
+// ===================================================================
+// 方案A: 选择性构建核心函数
+// Worker 只为高ROI机会构建质量数据 (ROI > 0.5%)
+// ===================================================================
+
+/**
+ * 计算路由复杂度评分 (1-10)
+ */
+function calculateComplexity(routePlan: any[]): number {
+  if (!routePlan || routePlan.length === 0) return 1;
+
+  // 基于DEX数量、账户数计算复杂度
+  const dexCount = new Set(routePlan.map((r: any) => r.swapInfo?.label)).size;
+  const uniqueAccounts = new Set(
+    routePlan.flatMap((r: any) => [
+      r.swapInfo?.inputMint,
+      r.swapInfo?.outputMint,
+      r.swapInfo?.ammKey
+    ])
+  ).size;
+
+  // 评分: 1 (简单) 到 10 (复杂)
+  const score = Math.min(10, dexCount * 2 + uniqueAccounts / 10);
+  return Math.max(1, score);
+}
+
+/**
+ * 估算交易大小 (bytes)
+ */
+function estimateTransactionSize(
+  outbound: { instructions?: any[] },
+  returnInstr: { instructions?: any[] }
+): number {
+  const baseSize = 500; // 基础交易大小
+  const instructionOverhead = 32; // 每个指令开销
+
+  const outboundSize = (outbound.instructions?.length || 0) * instructionOverhead;
+  const returnSize = (returnInstr.instructions?.length || 0) * instructionOverhead;
+
+  return baseSize + outboundSize + returnSize;
+}
+
+/**
+ * 模拟交易 (简化版)
+ * Worker 只做基础的结构检查和利润验证
+ */
+async function simulateTransaction(
+  outbound: any,
+  returnInstr: any,
+  opportunity: {
+    inputAmount: number;
+    profit: number;
+    outboundQuote: any;
+    returnQuote: any;
+  }
+): Promise<{
+  success: boolean;
+  profit: number;
+  logs: string[];
+}> {
+  try {
+    const logs: string[] = [];
+
+    // 1. 检查指令数量 (是否超过限制)
+    const totalInstructions =
+      (outbound.instructions?.length || 0) +
+      (returnInstr.instructions?.length || 0);
+    logs.push(`Total instructions: ${totalInstructions}`);
+
+    if (totalInstructions > 50) {
+      return {
+        success: false,
+        profit: 0,
+        logs: [...logs, 'ERROR: Too many instructions (> 50)']
+      };
+    }
+
+    // 2. 检查路由复杂度评分
+    const outboundComplexity = calculateComplexity(opportunity.outboundQuote.routePlan);
+    const returnComplexity = calculateComplexity(opportunity.returnQuote.routePlan);
+    const avgComplexity = (outboundComplexity + returnComplexity) / 2;
+    logs.push(`Complexity: outbound=${outboundComplexity}, return=${returnComplexity}, avg=${avgComplexity}`);
+
+    // 3. 检查预估大小 (是否超过限制)
+    const size = estimateTransactionSize(outbound, returnInstr);
+    logs.push(`Estimated size: ${size} bytes`);
+
+    if (size > 1200) { // Lite API 限制 ~1232 bytes
+      return {
+        success: false,
+        profit: 0,
+        logs: [...logs, 'ERROR: Transaction too large (> 1200 bytes)']
+      };
+    }
+
+    // 4. 基础通过
+    return {
+      success: true,
+      profit: opportunity.profit,
+      logs
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      profit: 0,
+      logs: [error.message]
+    };
+  }
+}
+
+/**
+ * 构建质量数据 (方案A: 选择性构建)
+ * Worker 只为高ROI机会构建完整质量数据 (ROI > 0.5%)
+ */
+async function buildQualityData(
+  opportunity: {
+    inputMint: PublicKey;
+    outputMint: PublicKey;
+    bridgeMint: PublicKey;
+    inputAmount: number;
+    profit: number;
+    outboundQuote: any;
+    returnQuote: any;
+  }
+): Promise<BuildQuality> {
+  const startTime = Date.now();
+
+  try {
+    // 1. 构建去程指令
+    const outboundStart = Date.now();
+    const outboundResult = await axios.post(
+      `${JUPITER_API_URL}/swap-instructions`,
+      {
+        quoteResponse: opportunity.outboundQuote,
+        userPublicKey: '11111111111111111111111111111111', // 模拟地址
+        wrapUnwrapSOL: false, // 闪电贷模式
+      },
+      axiosConfig
+    );
+
+    // 2. 构建回程指令
+    const returnStart = Date.now();
+    const returnResult = await axios.post(
+      `${JUPITER_API_URL}/swap-instructions`,
+      {
+        quoteResponse: opportunity.returnQuote,
+        userPublicKey: '11111111111111111111111111111111',
+        wrapUnwrapSOL: false,
+      },
+      axiosConfig
+    );
+
+    // 3. 计算复杂度评分
+    const routePlan = [
+      ...opportunity.outboundQuote.routePlan,
+      ...opportunity.returnQuote.routePlan
+    ];
+    const complexityScore = calculateComplexity(routePlan);
+    const complexity = complexityScore > 7 ? 'high' :
+                      complexityScore > 4 ? 'medium' : 'low';
+
+    // 4. 估算交易大小
+    const estimatedSize = estimateTransactionSize(
+      outboundResult.data,
+      returnResult.data
+    );
+
+    // 5. 模拟交易
+    const simulation = await simulateTransaction(
+      outboundResult.data,
+      returnResult.data,
+      opportunity
+    );
+
+    return {
+      success: true,
+      buildTimeMs: Date.now() - startTime,
+      complexity,
+      outboundInstructions: outboundResult.data,
+      returnInstructions: returnResult.data,
+      simulation,
+      routeComplexityScore: complexityScore,
+      estimatedSize,
+    };
+
+  } catch (error: any) {
+    return {
+      success: false,
+      buildTimeMs: Date.now() - startTime,
+      complexity: 'high', // 🔥 修复: 接口只允许 'low'|'medium'|'high'
+      error: error.message,
+    };
   }
 }
 

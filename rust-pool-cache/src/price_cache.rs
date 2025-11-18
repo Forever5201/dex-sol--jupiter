@@ -3,6 +3,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tokio::sync::broadcast;
 
+use crate::state_layer::StateLayer;
+
 /// Pool price information
 #[derive(Clone, Debug)]
 pub struct PoolPrice {
@@ -148,6 +150,22 @@ impl PriceCache {
             .collect()
     }
     
+    /// Get the age (in milliseconds) of the latest price update for a pool
+    pub fn get_price_age_ms(&self, pool_id: &str) -> Option<u128> {
+        let prices = self.prices.read().unwrap();
+        prices
+            .get(pool_id)
+            .map(|p| p.last_update.elapsed().as_millis())
+    }
+
+    /// Determine whether a pool's cached price is stale
+    pub fn is_price_stale(&self, pool_id: &str, max_age_ms: u64) -> bool {
+        match self.get_price_age_ms(pool_id) {
+            Some(age) => age > max_age_ms as u128,
+            None => true,
+        }
+    }
+
     /// Get all cached prices
     pub fn get_all_prices(&self) -> Vec<PoolPrice> {
         let prices = self.prices.read().unwrap();
@@ -330,6 +348,70 @@ impl Clone for PriceCache {
             prices: Arc::clone(&self.prices),
             update_tx: self.update_tx.clone(),
         }
+    }
+}
+
+// 为 PriceCache 实现 StateLayer trait
+// 这使得 PriceCache 可以作为通用状态层使用
+impl StateLayer for PriceCache {
+    fn update_price(&self, pool_price: PoolPrice) {
+        // 复用现有的 update_price 方法
+        self.update_price(pool_price);
+    }
+
+    fn get_price(&self, pool_id: &str) -> Option<PoolPrice> {
+        // 复用现有的 get_price 方法
+        self.get_price(pool_id)
+    }
+
+    fn get_pools_by_pair(&self, pair: &str) -> Vec<PoolPrice> {
+        // 复用现有的 get_pools_by_pair 方法
+        self.get_pools_by_pair(pair)
+    }
+
+    fn subscribe_updates(&self) -> broadcast::Receiver<PriceUpdateEvent> {
+        // 复用现有的 subscribe_updates 方法
+        self.subscribe_updates()
+    }
+
+    fn get_all_prices(&self) -> Vec<PoolPrice> {
+        // 复用现有的 get_all_prices 方法
+        self.get_all_prices()
+    }
+
+    fn get_fresh_prices(&self, max_age_ms: u64) -> Vec<PoolPrice> {
+        // 复用现有的 get_fresh_prices 方法
+        self.get_fresh_prices(max_age_ms)
+    }
+
+    fn get_slot_aligned_snapshot(&self, max_slot_spread: u64) -> Vec<PoolPrice> {
+        // 复用现有的 get_slot_aligned_snapshot 方法
+        self.get_slot_aligned_snapshot(max_slot_spread)
+    }
+
+    fn get_consistent_snapshot(&self, max_age_ms: u64, max_slot_spread: u64) -> Vec<PoolPrice> {
+        // 复用现有的 get_consistent_snapshot 方法
+        self.get_consistent_snapshot(max_age_ms, max_slot_spread)
+    }
+
+    fn get_latest_slot(&self) -> u64 {
+        // 复用现有的 get_latest_slot 方法
+        self.get_latest_slot()
+    }
+
+    fn is_price_stale(&self, pool_id: &str, max_age_ms: u64) -> bool {
+        // 复用现有的 is_price_stale 方法
+        self.is_price_stale(pool_id, max_age_ms)
+    }
+
+    fn get_price_age_ms(&self, pool_id: &str) -> Option<u128> {
+        // 复用现有的 get_price_age_ms 方法
+        self.get_price_age_ms(pool_id)
+    }
+
+    fn get_stats(&self) -> (usize, Vec<String>) {
+        // 复用现有的 get_stats 方法
+        self.get_stats()
     }
 }
 

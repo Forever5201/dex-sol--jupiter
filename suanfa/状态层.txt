@@ -1,0 +1,180 @@
+/*
+ * -----------------------------------------------------------------------------
+ * 状态管理层 (State Management Layer) - 完整方案
+ *
+ * 依赖 (Cargo.toml):
+ * tokio = { version = "1", features = ["full"] }
+ * dashmap = "5"
+ * log = "0.4"
+ * env_logger = "0.11"
+ * rand = "0.8" // 用于模拟
+ * -----------------------------------------------------------------------------
+ */
+
+use dashmap::DashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::time::interval;
+
+// ---
+// 为了示例独立运行，我们简化 Pubkey
+// 在实际项目中, 你应该使用 `solana_program::pubkey::Pubkey`
+// ---
+type Pubkey = String;
+
+// =============================================================================
+// [组件一] 状态层的数据结构
+// =============================================================================
+
+/// PoolInfo 结构体，存储每个池子的状态
+#[derive(Debug, Clone)]
+struct PoolInfo {
+    token_a_reserves: u64,
+    token_b_reserves: u64,
+    token_a_mint: Pubkey,
+    token_b_mint: Pubkey,
+    last_updated: Instant,
+}
+
+/// "当前最优世界观" (Current Best Worldview)
+///
+/// 这就是您方案的核心：
+/// 1. `DashMap`: 提供了分片锁，允许极高并发的读/写，
+///    远胜于 `Arc<RwLock<HashMap>>` (后者在写操作时会锁住整个表)。
+/// 2. `Arc`: 允许在多个异步任务 (线程) 之间安全地共享 `DashMap` 的所有权。
+type Worldview = Arc<DashMap<Pubkey, PoolInfo>>;
+
+// =============================================================================
+// [写入演示] 订阅器 (Subscriber)
+// =============================================================================
+
+/// 模拟一个订阅器任务
+///
+/// 它的 *唯一工作* (正如您所描述的) 就是获取更新并
+/// **立即写入** `Worldview`。
+///
+/// 注意 `worldview: Worldview` 参数 (一个 `Arc`) 是如何被传入的。
+async fn run_mock_subscriber(worldview: Worldview) {
+    let pool_id = "SOL_USDC_POOL_ADDRESS".to_string();
+
+    // 模拟池子的初始状态
+    let initial_pool = PoolInfo {
+        token_a_reserves: 1_000_000,
+        token_b_reserves: 100_000_000,
+        token_a_mint: "SOL_MINT_ADDRESS".to_string(),
+        token_b_mint: "USDC_MINT_ADDRESS".to_string(),
+        last_updated: Instant::now(),
+    };
+    
+    // 写入操作 (1): 插入初始数据
+    worldview.insert(pool_id.clone(), initial_pool);
+    log::info!("(Subscriber) 模拟器启动，已写入初始池子状态");
+
+    let mut interval = interval(Duration::from_millis(10)); // 模拟每 10ms 一次高频更新
+
+    loop {
+        interval.tick().await;
+        
+        // 模拟价格变动
+        let reserves_change = (rand::random::<f64>() * 1000.0) as u64;
+
+        // 写入操作 (2): 高并发更新
+        // `DashMap` 的 `get_mut` 会返回一个 `RefMut`，
+        // 它只锁定该 `pool_id` 所在的 "分片"，而不会锁定整个 `DashMap`。
+        // 这就是它高性能的关键。
+        if let Some(mut pool_entry) = worldview.get_mut(&pool_id) {
+            // 获取写锁并立即更新
+            pool_entry.token_a_reserves += reserves_change;
+            pool_entry.last_updated = Instant::now();
+            log::debug!("(Subscriber) 写入新储备量: {}", pool_entry.token_a_reserves);
+        }
+        // `pool_entry` 在这里被释放，锁也随之释放。
+    }
+}
+
+// =============================================================================
+// [读取演示] 计算器 (Calculator)
+// =============================================================================
+
+/// 模拟一个计算器任务
+///
+/// 它的工作是定期 *读取* `Worldview` 的 "快照" 来进行昂贵的计算。
+/// 它**不应该**在计算期间长时间持有锁。
+async fn run_mock_calculator(worldview: Worldview) {
+    let mut interval = interval(Duration::from_millis(100)); // 计算器每 100ms 运行一次
+
+    loop {
+        interval.tick().await;
+
+        // --- 读取路径 (快照) ---
+        // 这是从高并发状态层读取数据的 *最佳实践*：
+        // 1. 克隆 `Arc` (成本极低，只是增加引用计数)
+        let worldview_snapshot = worldview.clone();
+        
+        // 2. 将昂贵的计算任务移出异步运行时
+        let calculation_task = tokio::task::spawn_blocking(move || {
+            // 在这个专用线程中，我们开始迭代 DashMap。
+            // 迭代 `DashMap` (通过 .iter()) 会持有读锁。
+            // 更好的方式是 *克隆* 所需的数据，然后立即释放锁。
+            
+            // 方案 A: 迭代 (持有短期读锁)
+            let mut pool_count = 0;
+            for entry in worldview_snapshot.iter() {
+                pool_count += 1;
+                // 模拟一些轻量工作
+                let _ = entry.value().token_a_reserves;
+            }
+
+            // 方案 B: 克隆 (推荐用于重度计算)
+            // let all_pools: Vec<PoolInfo> = worldview_snapshot
+            //     .iter()
+            //     .map(|entry| entry.value().clone())
+            //     .collect();
+            //
+            // (现在锁已完全释放，可以在 `all_pools` 上进行任意长时间的计算)
+            
+            log::info!("(Calculator) 快照读取完成，分析了 {} 个池子", pool_count);
+
+            // 模拟昂贵的 Bellman-Ford 计算...
+            std::thread::sleep(Duration::from_millis(20));
+
+            log::info!("(Calculator) 计算完成");
+        });
+
+        // 等待计算完成
+        let _ = calculation_task.await;
+    }
+}
+
+
+// =============================================================================
+// [主函数] 组装
+// =============================================================================
+
+#[tokio::main]
+async fn main() {
+    // 设置日志
+    std::env::set_var("RUST_LOG", "info"); // 可调为 "debug" 观察高频写入
+    env_logger::init();
+
+    // 1. 初始化 [状态层]
+    // 这是 `Worldview` 实例的 "唯一所有者"
+    let worldview: Worldview = Arc::new(DashMap::new());
+    log::info!("(Main) Worldview (状态层) 已初始化");
+
+    // 2. 启动 [写入] 任务 (订阅器)
+    // 我们克隆 `Arc`，所有权被 *共享* 给订阅器任务
+    let subscriber_handle = tokio::spawn(run_mock_subscriber(worldview.clone()));
+    log::info!("(Main) 订阅器任务已启动");
+
+    // 3. 启动 [读取] 任务 (计算器)
+    // 我们再次克隆 `Arc`，所有权被 *共享* 给计算器任务
+    let calculator_handle = tokio::spawn(run_mock_calculator(worldview.clone()));
+    log::info!("(Main) 计算器任务已启动");
+
+    // 等待所有任务完成
+    let _ = tokio::try_join!(
+        subscriber_handle,
+        calculator_handle
+    );
+}

@@ -165,7 +165,7 @@ impl DexPool for PhoenixMarketFull {
     
     fn get_additional_info(&self) -> Option<String> {
         let spread = match (self.best_bid, self.best_ask) {
-            (Some(bid), Some(ask)) if bid > 0.0 => ((ask - bid) / bid * 100.0),
+            (Some(bid), Some(ask)) if bid > 0.0 => (ask - bid) / bid * 100.0,
             _ => 0.0,
         };
         

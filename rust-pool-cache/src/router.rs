@@ -170,15 +170,80 @@ impl Router {
     /// 🔥 核心方法：寻找所有套利机会
     pub fn find_all_opportunities(&self, initial_amount: f64) -> Vec<ArbitragePath> {
         let mut all_paths = Vec::new();
-        
+
+        // 🔥 数据质量监控 - 调试日志
+        let all_prices = self.price_cache.get_all_prices();
+        println!("📊 [路由调试] 缓存数据质量报告:");
+        println!("   - 总池子数量: {}", all_prices.len());
+
+        // 统计各交易对的池子分布
+        let mut pair_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut dex_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        for price in &all_prices {
+            *pair_count.entry(price.pair.clone()).or_insert(0) += 1;
+            *dex_count.entry(price.dex_name.clone()).or_insert(0) += 1;
+        }
+
+        println!("   - 唯一交易对数量: {}", pair_count.len());
+        for (pair, count) in pair_count.iter().take(5) {
+            println!("     * {}: {} 个池子", pair, count);
+        }
+
+        println!("   - DEX分布 (前5个):");
+        for (dex, count) in dex_count.iter().take(5) {
+            println!("     * {}: {} 个池子", dex, count);
+        }
+
+        // 检查是否能形成套利的基本条件
+        let multi_pools: Vec<_> = pair_count.iter()
+            .filter(|(_, &count)| count >= 2)
+            .collect();
+
+        println!("   - 可套利交易对 (≥2个池子): {}", multi_pools.len());
+        if !multi_pools.is_empty() {
+            for (pair, count) in multi_pools.iter().take(3) {
+                println!("     * {}: {} 个池子", pair, count);
+            }
+        }
+
+        if multi_pools.is_empty() {
+            println!("   ❌ 警告: 没有发现任何可套利的交易对!");
+            println!("   💡 提示: 需要在不同DEX上加载同一交易对的池子");
+        }
+
         // 1. 寻找直接套利机会（最简单，最快）
+        let direct_start = std::time::Instant::now();
         let direct_paths = self.find_direct_arbitrage(initial_amount);
+        println!("   ⏱️  直接套利扫描完成: {} 条路径 (耗时: {:?})", direct_paths.len(), direct_start.elapsed());
+
+        // 🔍 显示直接套利的详细路径
+        if !direct_paths.is_empty() {
+            println!("   📋 直接套利路径详情:");
+            for (i, path) in direct_paths.iter().enumerate() {
+                println!("\n   [直接套利 {}] ROI: {:.6}%", i + 1, path.roi_percent);
+                println!("   {}", self.format_arbitrage_path_for_debug(path));
+            }
+        }
+
         all_paths.extend(direct_paths);
-        
+
         // 2. 寻找三角套利机会
+        let triangle_start = std::time::Instant::now();
         let triangle_paths = self.find_triangle_arbitrage(initial_amount);
+        println!("   ⏱️  三角套利扫描完成: {} 条路径 (耗时: {:?})", triangle_paths.len(), triangle_start.elapsed());
+
+        // 🔍 显示三角套利的详细路径
+        if !triangle_paths.is_empty() {
+            println!("   📋 三角套利路径详情:");
+            for (i, path) in triangle_paths.iter().enumerate() {
+                println!("\n   [三角套利 {}] ROI: {:.6}%", i + 1, path.roi_percent);
+                println!("   {}", self.format_arbitrage_path_for_debug(path));
+            }
+        }
+
         all_paths.extend(triangle_paths);
-        
+
         // 3. 寻找多跳套利机会（可选，较复杂）
         // let multihop_paths = self.find_multihop_arbitrage(initial_amount);
         // all_paths.extend(multihop_paths);
@@ -642,13 +707,13 @@ impl Router {
         let mut output = String::new();
         
         output.push_str(&format!("🔥 {:?} 套利机会\n", path.arb_type));
-        output.push_str(&format!("   初始: {} {} → 最终: {} {}\n", 
+        output.push_str(&format!("   初始: {} {} → 最终: {} {}\n",
             path.input_amount, path.start_token,
             path.output_amount, path.end_token));
-        output.push_str(&format!("   净利润: {:.6} {} ({:.2}% ROI)\n", 
+        output.push_str(&format!("   净利润: {:.6} {} ({:.2}% ROI)\n",
             path.net_profit, path.start_token, path.roi_percent));
         output.push_str("   路径:\n");
-        
+
         for (idx, step) in path.steps.iter().enumerate() {
             output.push_str(&format!("     {}. [{}] {} → {} (价格: {:.6})\n",
                 idx + 1,
@@ -657,7 +722,91 @@ impl Router {
                 step.output_token,
                 step.price));
         }
-        
+
+        output
+    }
+
+    /// 🔥 调试专用：格式化ArbitragePath（显示更多细节）
+    fn format_arbitrage_path_for_debug(&self, path: &ArbitragePath) -> String {
+        let mut output = String::new();
+
+        output.push_str(&format!(
+            "   📊 套利类型: {:?}\n",
+            path.arb_type
+        ));
+        output.push_str(&format!(
+            "   💰 初始金额: {:.6} {}\n",
+            path.input_amount,
+            path.start_token
+        ));
+        output.push_str(&format!(
+            "   💵 最终金额: {:.6} {}\n",
+            path.output_amount,
+            path.end_token
+        ));
+        output.push_str(&format!(
+            "   📈 毛利润: {:.6} {}\n",
+            path.gross_profit,
+            path.start_token
+        ));
+        output.push_str(&format!(
+            "   💸 估算费用: {:.6} {}\n",
+            path.estimated_fees,
+            path.start_token
+        ));
+        output.push_str(&format!(
+            "   🎯 净利润: {:.6} {}\n",
+            path.net_profit,
+            path.start_token
+        ));
+        output.push_str(&format!(
+            "   📊 ROI: {:.6}%\n",
+            path.roi_percent
+        ));
+        output.push_str(&format!(
+            "   ⏱️  发现时间: {:?}\n",
+            path.discovered_at.elapsed()
+        ));
+
+        // 显示有效性检查
+        let is_valid_loop = path.start_token == path.end_token;
+        let is_valid_profit = path.net_profit > 0.0;
+        let is_valid_roi = path.roi_percent >= self.min_roi_percent;
+        let is_valid_steps = path.steps.len() >= 2 && path.steps.len() <= 5;
+
+        output.push_str(&format!(
+            "   ✅ 有效性检查: 循环={}, 利润={}, ROI≥{}%={}, 跳数={}\n",
+            if is_valid_loop { "✓" } else { "✗" },
+            if is_valid_profit { "✓" } else { "✗" },
+            self.min_roi_percent,
+            if is_valid_roi { "✓" } else { "✗" },
+            if is_valid_steps { "✓" } else { "✗" }
+        ));
+
+        // 显示每条步骤的详细信息
+        output.push_str(&format!(
+            "   🛣️  路由步骤 ({}跳):\n",
+            path.steps.len()
+        ));
+
+        for (idx, step) in path.steps.iter().enumerate() {
+            output.push_str(&format!("\n   [{}/{}] [{}] {} → {}\n",
+                idx + 1,
+                path.steps.len(),
+                step.dex_name,
+                step.input_token,
+                step.output_token
+            ));
+            output.push_str(&format!("        价格: {:.6}\n", step.price));
+            output.push_str(&format!("        输入: {:.6} {}\n", step.expected_input, step.input_token));
+            output.push_str(&format!("        输出: {:.6} {}\n", step.expected_output, step.output_token));
+            output.push_str(&format!("        池子ID: {}\n", step.pool_id));
+            output.push_str(&format!("        流动性: base={}, quote={}\n",
+                step.liquidity_base,
+                step.liquidity_quote
+            ));
+        }
+
         output
     }
 }

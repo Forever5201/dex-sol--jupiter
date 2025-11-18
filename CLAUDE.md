@@ -119,10 +119,19 @@ See `packages/core/src/economics/README.md` for detailed API documentation.
 1. **Jito Bundle** - Submit transactions via Jito Block Engine for MEV protection
    - Higher success rate but requires tip payment
    - Used for medium-large capital strategies
+   - Waits for Jito leader scheduling for optimal timing
 
 2. **RPC Spam** - Rapidly send transactions to multiple RPC endpoints
    - Lower cost but lower success rate
    - Used for small capital strategies
+   - Sends to multiple RPCs simultaneously for higher inclusion probability
+
+### Strategy Selection Logic
+The system automatically selects execution strategy based on:
+- **Capital size**: Determines minimum profit thresholds and risk tolerance
+- **Profit potential**: Higher profits can justify higher Jito tips
+- **Market conditions**: Dynamic tip optimization based on competition
+- **Success rate targets**: Each strategy tier has specific success rate goals
 
 ### Flashloan Integration
 
@@ -150,13 +159,15 @@ The system has sophisticated proxy support for users in restricted regions:
 See `docs/performance/LATENCY_OPTIMIZATION_COMPLETE.md` for detailed optimization strategies.
 
 ### Database Schema
-Uses Prisma ORM with PostgreSQL (optional) for tracking:
-- Arbitrage opportunities discovered
-- Trade execution results
-- Route performance
-- Validation data
+Uses Prisma ORM with PostgreSQL (optional) for comprehensive tracking:
+- **Opportunity lifecycle**: Discovery → Simulation → Validation → Execution
+- **Performance metrics**: Detailed latency stats and parallel processing statistics
+- **Filter tracking**: Records why and when opportunities are filtered out
+- **Daily analytics**: Automatic profit/loss aggregation and success rate tracking
 
 Schema location: `packages/core/prisma/schema.prisma`
+
+Key tables: Trade, Opportunity, TradeRoute, DailyStatistic, OpportunityValidation
 
 ## Testing Strategy
 
@@ -168,15 +179,22 @@ Schema location: `packages/core/prisma/schema.prisma`
 
 ## Important Development Notes
 
-### Solana Web3.js Version
-- **CRITICAL**: Project pins `@solana/web3.js` to `1.98.4` in pnpm overrides
-- Do not upgrade without testing - newer versions may break compatibility
+### System Requirements
+- **Node.js**: >= 20.0.0 (required for modern Solana operations)
+- **pnpm**: Required for workspace management
+- **Rust**: Optional but recommended for pool cache performance
+
+### Critical Version Constraints
+- **CRITICAL**: `@solana/web3.js` is pinned to `1.98.4` in pnpm overrides - do not upgrade without extensive testing
+- **TypeScript**: Target ES2022, CommonJS modules, strict mode enabled
+- **Jest**: 30s timeout default, 60s for performance tests, maxWorkers: 50%
 
 ### TypeScript Configuration
 - Target: ES2022, CommonJS modules
 - Strict mode enabled
 - Includes: `packages/**/*`, `tools/**/*`, `examples/**/*`
 - Build outputs to `dist/` in each package
+- Module mapping: `@solana-arb-bot/*` path aliases configured
 
 ### Cost Structure Reference
 | Cost Type | Amount | Notes |
@@ -208,18 +226,32 @@ Comprehensive documentation in `docs/` directory:
 
 See `docs/README.md` for complete documentation index.
 
-## Common Pitfalls
+## Common Pitfalls & Critical Issues
 
-1. **Forgetting to set `acknowledge_terms_of_service = true`** - Bot will not start
-2. **Using main wallet** - Always use dedicated hot wallets
-3. **Insufficient balance** - Keep minimum balance as configured in strategy
-4. **Proxy misconfiguration** - Check proxy settings if in restricted regions
-5. **RPC rate limits** - Use paid RPC endpoints for production
-6. **Jito leader not scheduled** - Bot waits for Jito validator as leader
-7. **Circuit breaker triggered** - Check health metrics when trading stops
+### Startup Blockers
+1. **Forgetting `acknowledge_terms_of_service = true`** - Bot will not start (most common issue)
+2. **Missing keypairs** - Ensure `keypairs/` directory exists with valid keypair files
+3. **Insufficient SOL balance** - Keep minimum balance as configured in strategy + transaction fees
+4. **Invalid RPC endpoints** - Use paid RPC endpoints for production (free tiers have rate limits)
+
+### Runtime Issues
+5. **Jito leader not scheduled** - Bot waits for Jito validator as leader (check `npm run jito-monitor`)
+6. **Circuit breaker triggered** - Check health metrics when trading stops (see monitoring logs)
+7. **Proxy misconfiguration** - Check proxy settings if in restricted regions
+8. **Database connection failures** - PostgreSQL is optional but migrations must be run if enabled
+
+### Performance Issues
+9. **Rust cache not running** - Ensure `rust-pool-cache` is built and running for optimal performance
+10. **Worker thread exhaustion** - Monitor worker pool usage in high-frequency scenarios
+11. **Memory leaks** - Watch for unclosed WebSocket connections or event listeners
+
+### Version-Specific Issues
+12. **Solana web3.js upgrades** - Never upgrade beyond 1.98.4 without extensive testing
+13. **Node.js compatibility** - Use Node.js >= 20.0.0 for optimal performance
 
 ## When Editing Code
 
+### Code Standards
 - Follow existing TypeScript patterns and conventions
 - Costs are always in lamports (1 SOL = 10^9 lamports)
 - Use the unified proxy adapter for all network calls
@@ -229,10 +261,29 @@ See `docs/README.md` for complete documentation index.
 - Log important events using the Pino logger from `packages/core/src/logger`
 - Handle errors gracefully - circuit breaker depends on error tracking
 
-## Debugging
+### Critical Files to Understand
+1. **`packages/core/src/economics/`** - The "brain" of the system, all profit calculations flow through here
+2. **`packages/core/src/network/unified-adapter.ts`** - All network calls must go through this adapter
+3. **`packages/jupiter-bot/src/opportunity-finder.ts`** - Core opportunity discovery logic
+4. **`rust-pool-cache/src/router_advanced.rs`** - High-performance routing algorithms
 
+### Architecture Patterns to Follow
+- **Factory Pattern**: Use `createEconomicsSystem()` for instantiating economic components
+- **Parallel Validation**: Opportunities go through discovery → simulation → validation → execution
+- **Error Propagation**: Always preserve error context for circuit breaker tracking
+- **Performance Metrics**: Add latency tracking to any new network operations
+
+### Testing Requirements
+- Unit tests for economic calculations (critical for financial correctness)
+- Integration tests for opportunity flow (discovery → execution)
+- Performance tests for any new algorithms or data structures
+- Always test with both Jito and RPC spam strategies
+
+## Debugging & Development Tools
+
+### Essential Debugging Commands
 ```bash
-# Check wallet addresses
+# Check wallet addresses and balances
 ts-node get-wallet-addresses.ts
 
 # Monitor Jito tips in real-time
@@ -247,6 +298,24 @@ npm run test-jupiter
 # View latency statistics
 # See docs/performance/如何查看延迟统计日志.md
 ```
+
+### Advanced Analysis Tools
+The system includes 30+ specialized tools for analysis:
+- **Pool quality validation**: Check pool data integrity across DEXs
+- **Performance profiling**: Detailed latency analysis and optimization verification
+- **Opportunity funnel analysis**: Track why opportunities are filtered at each stage
+- **HTML dashboards**: Real-time monitoring and historical analysis
+
+Tools are located in `tools/` directory with detailed documentation.
+
+### Environment Configuration
+The `.env` file supports extensive configuration:
+- **RPC connection pooling**: Configure pool sizes and concurrency limits
+- **Proxy settings**: Full HTTP/HTTPS/WebSocket proxy support
+- **Performance tuning**: Worker threads, cache TTLs, metric intervals
+- **Security limits**: Maximum trade amounts, minimum balance requirements
+
+See `.env.example` for complete configuration options.
 
 ## Security Notes
 

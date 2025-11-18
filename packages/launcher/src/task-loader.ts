@@ -14,6 +14,8 @@ export interface Task {
   name: string;
   start(config: any): Promise<void>;
   stop(): Promise<void>;
+  instance?: any;        // 任务实例（可选）
+  process?: any;         // 子进程（可选）
 }
 
 /**
@@ -61,49 +63,57 @@ export function getAvailableTasks(): string[] {
  */
 registerTask('jupiter-bot', async () => {
   const { JupiterBot } = await import('../../jupiter-bot/src/index');
-  
-  return {
+
+  // ✅ 修复：创建 Task 对象，避免 this 类型推断问题
+  const task: Task = {
     name: 'jupiter-bot',
-    instance: null as any,
-    
+    instance: null,
+
     async start(config: any) {
       console.log('🤖 Starting Jupiter Bot...');
-      this.instance = new JupiterBot(config);
-      await this.instance.start();
+      task.instance = new JupiterBot(config);
+      await task.instance.start();
     },
-    
+
     async stop() {
-      if (this.instance) {
+      if (task.instance) {
         console.log('🛑 Stopping Jupiter Bot...');
-        await this.instance.stop();
+        await task.instance.stop();
       }
     },
   };
+
+  return task;
 });
 
 /**
  * OnChain Bot任务
  */
 registerTask('onchain-bot', async () => {
-  const { OnChainBot } = await import('../../onchain-bot/src/index');
-  
-  return {
+  // ✅ 修复：onchain-bot 使用默认导出，需要先获取模块再取 default
+  const OnChainBotModule = await import('../../onchain-bot/src/index');
+  const OnChainBot = OnChainBotModule.default;
+
+  // ✅ 修复：创建 Task 对象，避免 this 类型推断问题
+  const task: Task = {
     name: 'onchain-bot',
-    instance: null as any,
-    
+    instance: null,
+
     async start(config: any) {
       console.log('⛓️  Starting OnChain Bot...');
-      this.instance = new OnChainBot(config);
-      await this.instance.start();
+      task.instance = new OnChainBot(config);
+      await task.instance.start();
     },
-    
+
     async stop() {
-      if (this.instance) {
+      if (task.instance) {
         console.log('🛑 Stopping OnChain Bot...');
-        await this.instance.stop();
+        await task.instance.stop();
       }
     },
   };
+
+  return task;
 });
 
 /**

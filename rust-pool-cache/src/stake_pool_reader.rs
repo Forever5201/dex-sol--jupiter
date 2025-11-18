@@ -4,7 +4,7 @@
  * 实时读取Marinade和Jito的stake pool状态，获取LST的理论赎回比率
  */
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;

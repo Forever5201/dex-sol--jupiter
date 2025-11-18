@@ -1,17 +1,3 @@
-/// Phoenix Market Integration using Official SDK
-/// 
-/// This module provides proper Phoenix CLOB market integration by using
-/// the official Phoenix SDK to parse Market + OrderBook data.
-/// 
-/// Architecture:
-/// ```
-/// Phoenix Market Account = [MarketHeader | OrderBook | TraderState]
-///                          ↓             ↓
-///                      Metadata    Load with SDK
-/// ```
-
-use std::mem::size_of;
-use std::collections::BTreeMap;
 use solana_sdk::pubkey::Pubkey;
 use crate::dex_interface::{DexPool, DexError};
 
@@ -144,7 +130,7 @@ impl DexPool for PhoenixMarketSDK {
     
     fn get_additional_info(&self) -> Option<String> {
         let spread = match (self.best_bid, self.best_ask) {
-            (Some(bid), Some(ask)) => ((ask - bid) / bid * 100.0),
+            (Some(bid), Some(ask)) => (ask - bid) / bid * 100.0,
             _ => 0.0,
         };
         

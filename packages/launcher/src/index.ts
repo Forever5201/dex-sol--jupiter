@@ -280,5 +280,5 @@ if (require.main === module) {
   });
 }
 
-// 导出
-export { Launcher };
+// Launcher 类已经在第39行导出，这里不需要重复导出
+// export { Launcher };

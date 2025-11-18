@@ -13,7 +13,7 @@
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::str::FromStr;
-use tracing::{debug, warn};
+use tracing::debug;
 use spl_token::state::Account as SplTokenAccount;
 use solana_program::program_pack::Pack;
 

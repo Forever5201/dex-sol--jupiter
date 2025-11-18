@@ -1,0 +1,13 @@
+Windows Registry Editor Version 5.00
+
+; =======================================================================
+; CMD/PowerShell UTF-8 编码永久修复
+; 修复中文乱码和emoji显示问题
+; ========================================================================
+
+; 修复CMD（命令提示符）
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Command Processor]
+"Autorun"="chcp 65001 > nul"
+
+[HKEY_CURRENT_USER\Software\Microsoft\Command Processor]
+"Autorun"="chcp 65001 > nul"

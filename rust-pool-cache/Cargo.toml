@@ -21,14 +21,14 @@ serde_json = "1.0"
 # Solana SDK
 solana-sdk = "1.17"
 solana-program = "1.17"
-solana-client = "1.17"  # 🎯 链上模拟需要
+solana-client = "1.17"  # 
 spl-token = "4.0"
 
 # Serialization
 borsh = "0.10"
 base64 = "0.21"
 
-# Phoenix SDK (CLOB市场支持) - 最小化依赖
+# Phoenix SDK (CLOB)
 phoenix-common = { version = "0.2.1", features = ["no-entrypoint"], default-features = false }
 bytemuck = "1.14"
 itertools = "0.10.5"
@@ -37,7 +37,7 @@ num-traits = "0.2"
 # Orca Whirlpool SDK
 orca_whirlpools_client = "5.0.1"
 
-# 注意：phoenix-sdk-core有复杂的编译依赖（protobuf），暂时不启用
+# :phoenix-sdk-core(protobuf),
 # phoenix-sdk-core = { path = "../temp_phoenix/rust/crates/phoenix-sdk-core" }
 
 # Config and utilities
@@ -71,6 +71,7 @@ dashmap = "5.5"
 
 # Parallel computation
 rayon = "1.8"  # 🔥 用于并行化Bellman-Ford
+num_cpus = "1.17.0"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -79,9 +80,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "router_comparison"
 harness = false
 
-[[bin]]
-name = "fetch_pool_account"
-path = "src/bin/fetch_pool_account.rs"
+# ⚠️ 临时注释：fetch_pool_account.rs文件为空，导致编译错误
+# [[bin]]
+# name = "fetch_pool_account"
+# path = "src/bin/fetch_pool_account.rs"
 
 [profile.release]
 opt-level = 3

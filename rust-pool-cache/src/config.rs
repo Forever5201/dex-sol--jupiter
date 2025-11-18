@@ -19,6 +19,8 @@ pub struct Config {
     pub initialization: Option<InitializationConfig>,  // 🚀 池子初始化配置
     #[serde(default)]
     pub lst_detector: Option<LstDetectorConfig>,  // 🔥 LST检测器配置
+    #[serde(default)]
+    pub state_layer: Option<StateLayerConfig>,  // 🔥 状态层配置
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,24 +361,62 @@ fn default_jito_unstake_fee() -> f64 {
     0.001
 }
 
+/// 状态层配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateLayerConfig {
+    /// 状态层类型
+    ///
+    /// 可选值：
+    /// - "rwlock": RwLock<HashMap>，适合低频更新（<100次/秒）
+    /// - "dashmap": DashMap，适合高频更新（>100次/秒）
+    ///
+    /// 默认值："rwlock"
+    #[serde(default = "default_state_layer_type")]
+    pub state_type: String,
+
+    /// 是否自动选择最优状态层类型
+    ///
+    /// 如果启用，根据预期负载自动选择 RwLock 或 DashMap
+    ///
+    /// 默认值：false
+    #[serde(default)]
+    pub auto_select: bool,
+
+    /// 预期更新频率（次/秒）
+    ///
+    /// 用于自动选择时的参考值
+    ///
+    /// 默认值：50.0
+    #[serde(default = "default_expected_update_rate")]
+    pub expected_update_rate: f64,
+}
+
+fn default_state_layer_type() -> String {
+    "rwlock".to_string()
+}
+
+fn default_expected_update_rate() -> f64 {
+    50.0
+}
+
 impl Config {
     /// Load configuration from a TOML file
     pub fn load_from_file(path: &str) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path))?;
-        
+
         let config: Config = toml::from_str(&content)
             .with_context(|| "Failed to parse config TOML")?;
-        
+
         // Validate configuration
         if config.websocket.url.is_empty() {
             anyhow::bail!("WebSocket URL cannot be empty");
         }
-        
+
         if config.pools.is_empty() {
             anyhow::bail!("At least one pool must be configured");
         }
-        
+
         for pool in &config.pools {
             if pool.address.is_empty() {
                 anyhow::bail!("Pool address cannot be empty");
@@ -385,18 +425,29 @@ impl Config {
                 anyhow::bail!("Pool name cannot be empty");
             }
         }
-        
+
         Ok(config)
     }
-    
+
     /// Get the WebSocket URL
     pub fn websocket_url(&self) -> &str {
         &self.websocket.url
     }
-    
+
     /// Get all pool configurations
     pub fn pools(&self) -> &[PoolConfig] {
         &self.pools
+    }
+
+    /// 获取状态层配置
+    ///
+    /// 如果配置文件中未指定，返回默认值
+    pub fn state_layer_config(&self) -> StateLayerConfig {
+        self.state_layer.clone().unwrap_or_else(|| StateLayerConfig {
+            state_type: default_state_layer_type(),
+            auto_select: false,
+            expected_update_rate: default_expected_update_rate(),
+        })
     }
 }
 

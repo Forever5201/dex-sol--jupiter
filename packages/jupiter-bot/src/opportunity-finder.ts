@@ -69,6 +69,8 @@ export interface ArbitrageOpportunity {
     outboundMs?: number;  // 去程查询延迟
     returnMs?: number;    // 回程查询延迟
   };
+  /** 方案A: 构建质量数据（仅高ROI机会） */
+  quality?: any;
 }
 
 export interface RouteInfo {

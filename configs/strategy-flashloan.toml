@@ -79,6 +79,16 @@ safety_margin = 1.5  # 安全边际（考虑滑点）
 
 # ==================== Jupiter Bot 配置 ====================
 
+# 🔥 Jupiter API 配置（用于获取报价）
+[jupiter_api]
+# 使用 Lite API（推荐，无速率限制）
+endpoint = "https://lite-api.jup.ag/swap/v1"
+# API Key（可选，但建议使用）
+api_key = ""  # 如果有 API Key 请填写
+# 二次验证 API Key（可选，用于主线程验证）
+validation_api_key = ""  # 如果与 api_key 不同，请填写
+
+# Jupiter Server 配置（可选，用于自托管）
 [jupiter_server]
 rpc_url = "${RPC_URL}"
 port = 8080

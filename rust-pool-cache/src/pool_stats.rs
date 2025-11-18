@@ -220,13 +220,19 @@ impl PoolStatsCollector {
     }
 
     /// 打印统计摘要
+    ///
+    /// 活跃池子统计口径：最近 `time_window_seconds` 秒内有订阅/更新
     pub fn print_summary(&self, time_window_seconds: i64) {
         let all_stats = self.get_all_stats();
+        let now = Utc::now();
         
-        // 过滤时间窗口内的池子
+        // 过滤时间窗口内「最近有订阅/更新」的池子
         let active_stats: Vec<_> = all_stats
             .iter()
-            .filter(|s| s.uptime_seconds() <= time_window_seconds)
+            .filter(|s| {
+                let seconds_since_last_sub = (now - s.last_subscription).num_seconds();
+                seconds_since_last_sub <= time_window_seconds
+            })
             .collect();
 
         println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");

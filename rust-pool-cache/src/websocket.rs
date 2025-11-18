@@ -18,6 +18,7 @@ use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
 use crate::config::{PoolConfig, ProxyConfig};
+use crate::coordinator::PriceChangeEvent; // 🔥 Coordinator事件
 use crate::dex_interface::DexPool;
 use crate::error_tracker::ErrorTracker;
 use crate::metrics::MetricsCollector;
@@ -52,6 +53,7 @@ pub struct WebSocketClient {
     price_change_threshold: f64, // 🔥 Price change threshold for logging
     vault_subscription_tx: Arc<Mutex<Option<mpsc::UnboundedSender<SubscriptionRequest>>>>, // 🌐 动态订阅channel
     rpc_url: Option<String>, // 🚀 RPC URL for proactive vault detection
+    coordinator_tx: Arc<Mutex<Option<mpsc::Sender<PriceChangeEvent>>>>, // 🔥 Coordinator事件发送器
 }
 
 impl WebSocketClient {
@@ -80,9 +82,16 @@ impl WebSocketClient {
             price_change_threshold, // 🔥 设置价格变化阈值
             vault_subscription_tx: Arc::new(Mutex::new(None)), // 🌐 初始化为None，在连接时设置
             rpc_url, // 🚀 设置RPC URL
+            coordinator_tx: Arc::new(Mutex::new(None)), // 🔥 Coordinator发送器初始化为None
         }
     }
     
+    /// Set the coordinator sender (used to send price change events)
+    pub fn set_coordinator_sender(&self, sender: mpsc::Sender<PriceChangeEvent>) {
+        *self.coordinator_tx.lock().unwrap() = Some(sender);
+        info!("(WebSocket) Coordinator sender registered");
+    }
+
     /// Connect to the WebSocket server and start processing messages
     pub async fn run(&self, pools: Vec<PoolConfig>) -> Result<()> {
         loop {
@@ -94,7 +103,7 @@ impl WebSocketClient {
                     eprintln!("❌ WebSocket error: {}. Reconnecting in 5 seconds...", e);
                 }
             }
-            
+
             sleep(Duration::from_secs(5)).await;
         }
     }
@@ -361,22 +370,37 @@ impl WebSocketClient {
             .and_then(|d| d.as_str())
             .context("Missing base64 data")?;
         
-        let slot = msg
-            .pointer("/params/result/context/slot")
-            .and_then(|s| s.as_u64())
-            .unwrap_or(0);
-        
         // Get subscription ID to find the correct pool
         let subscription_id = msg
             .pointer("/params/subscription")
             .and_then(|s| s.as_u64())
             .context("Missing subscription ID")?;
-        
+
         // Decode base64 first (需要先解码来检查数据大小)
         use base64::Engine;
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(base64_data)
             .context("Failed to decode base64")?;
+
+        let slot = msg
+            .pointer("/params/result/context/slot")
+            .and_then(|s| s.as_u64())
+            .unwrap_or(0);
+
+        // ✅ 调试日志：验证slot提取
+        if slot == 0 {
+            warn!(
+                subscription_id = subscription_id,
+                "⚠️ Received account notification with slot=0, data_len={}",
+                decoded.len()
+            );
+        } else {
+            debug!(
+                subscription_id = subscription_id,
+                slot = slot,
+                "✅ Received account notification with valid slot"
+            );
+        }
         
         // 🌐 检查是否是 vault 账户更新（165 字节 = SPL Token Account）
         if decoded.len() == 165 {
@@ -387,8 +411,8 @@ impl WebSocketClient {
             };
             
             if let Some(address) = vault_address {
-                // 找到了vault地址，更新vault余额
-                return self.handle_vault_update(&address, &decoded, "vault").await;
+                // 找到了vault地址，更新vault余额（带上正确的slot）
+                return self.handle_vault_update(&address, &decoded, slot).await;
             } else {
                 // 不是我们订阅的vault，可能是其他Token账户
                 debug!("Received 165-byte account update (not a registered vault), subscription_id={}", subscription_id);
@@ -424,9 +448,9 @@ impl WebSocketClient {
         
         if let Some(vault_address) = vault_address_opt {
             // 这是一个vault订阅的更新
-            debug!("Received vault update: subscription_id={}, vault={}, len={}", 
+            debug!("Received vault update: subscription_id={}, vault={}, len={}",
                 subscription_id, vault_address, decoded.len());
-            return self.handle_vault_update(&vault_address, &decoded, "vault_subscription").await;
+            return self.handle_vault_update(&vault_address, &decoded, slot).await;
         }
         
         // 不是vault，查找pool配置
@@ -579,6 +603,7 @@ impl WebSocketClient {
             price_change_threshold: self.price_change_threshold,
             vault_subscription_tx: self.vault_subscription_tx.clone(),
             rpc_url: self.rpc_url.clone(),
+            coordinator_tx: self.coordinator_tx.clone(),
         }
     }
     
@@ -702,12 +727,22 @@ impl WebSocketClient {
                         
                         // 🔥 关键修复：无论vault是否已注册，都查询初始余额
                         // 这确保即使vault在RPC阶段已注册，也能获得初始数据
+                        // ✅ 修复：获取当前slot并传递给价格重新计算
+                        let current_slot = match rpc_client.get_slot() {
+                            Ok(slot) => slot,
+                            Err(e) => {
+                                warn!("Failed to get current slot: {}, using 0", e);
+                                0
+                            }
+                        };
+
                         self.fetch_and_update_vault_balances(
                             &rpc_client,
                             &vault_a,
                             &vault_b,
                             &pool_address,
-                            &pool_name
+                            &pool_name,
+                            current_slot,
                         ).await;
                     }
                 }
@@ -731,31 +766,32 @@ impl WebSocketClient {
         vault_b: &Pubkey,
         pool_address: &str,
         pool_name: &str,
+        slot: u64,  // ✅ 修复：接收 slot 参数
     ) {
         // 并行查询两个vault
         let rpc_a = rpc_client.clone();
         let rpc_b = rpc_client.clone();
         let vault_a_clone = *vault_a;
         let vault_b_clone = *vault_b;
-        
+
         info!("🔍 Fetching vault balances for {} via RPC...", pool_name);
-        
+
         let (result_a, result_b) = tokio::join!(
             tokio::task::spawn_blocking(move || rpc_a.get_account(&vault_a_clone)),
             tokio::task::spawn_blocking(move || rpc_b.get_account(&vault_b_clone))
         );
-        
+
         // 处理vault A
         match result_a {
             Ok(Ok(account_a)) => {
                 let vault_a_str = vault_a.to_string();
-                
+
                 // 更新VaultReader（传递原始数据）
                 let amount_result = {
                     let mut vault_reader = self.vault_reader.lock().unwrap();
                     vault_reader.update_vault(&vault_a_str, &account_a.data)
                 };
-                
+
                 match amount_result {
                     Ok(amount) => {
                         info!("💰 Fetched initial balance for vault A of {}: {}", pool_name, amount);
@@ -772,18 +808,18 @@ impl WebSocketClient {
                 warn!("❌ Task error fetching vault A for {}: {}", pool_name, e);
             }
         }
-        
+
         // 处理vault B
         match result_b {
             Ok(Ok(account_b)) => {
                 let vault_b_str = vault_b.to_string();
-                
+
                 // 更新VaultReader（传递原始数据）
                 let amount_result = {
                     let mut vault_reader = self.vault_reader.lock().unwrap();
                     vault_reader.update_vault(&vault_b_str, &account_b.data)
                 };
-                
+
                 match amount_result {
                     Ok(amount) => {
                         info!("💰 Fetched initial balance for vault B of {}: {}", pool_name, amount);
@@ -800,33 +836,34 @@ impl WebSocketClient {
                 warn!("❌ Task error fetching vault B for {}: {}", pool_name, e);
             }
         }
-        
-        // 🔥 触发价格重新计算
-        self.trigger_pool_price_recalculation(pool_address, pool_name).await;
+
+        // 🔥 触发价格重新计算（带正确的slot）
+        // ✅ 修复：传递 slot 参数而不是使用硬编码的0
+        self.trigger_pool_price_recalculation(pool_address, pool_name, slot).await;
     }
     
     /// 🔥 新增：触发池子价格重新计算
-    async fn trigger_pool_price_recalculation(&self, pool_address: &str, pool_name: &str) {
+    async fn trigger_pool_price_recalculation(&self, pool_address: &str, pool_name: &str, slot: u64) {
         // 获取池子配置和数据
         let (pool_config, pool_data) = {
             let subscription_map = self.subscription_map.lock().unwrap();
             let cache = self.pool_data_cache.lock().unwrap();
-            
+
             let config = subscription_map.values()
                 .find(|p| p.address == pool_address)
                 .cloned();
             let data = cache.get(pool_address).cloned();
-            
+
             (config, data)
         };
-        
+
         if let (Some(config), Some(data)) = (pool_config, pool_data) {
             // 解析池子并重新计算价格
             if let Ok(pool) = PoolFactory::create_pool(&config.pool_type, &data) {
-                let slot = 0;
                 let start_time = std::time::Instant::now();
+                // ✅ 修复：传递正确的slot而不是硬编码为0
                 self.update_cache_from_pool(pool.as_ref(), &config, pool_name, slot, start_time);
-                info!("🔄 Recalculated price for {} after fetching vault balances", pool_name);
+                info!("🔄 Recalculated price for {} after fetching vault balances (slot={})", pool_name, slot);
             }
         }
     }
@@ -836,7 +873,7 @@ impl WebSocketClient {
         &self,
         vault_address: &str,
         data: &[u8],
-        _context_name: &str,
+        slot: u64,  // ✅ 修复：添加slot参数
     ) -> Result<()> {
         // 检查是否是已注册的 vault
         let is_vault = {
@@ -853,6 +890,7 @@ impl WebSocketClient {
         debug!(
             vault = %vault_address,
             data_len = data.len(),
+            slot = slot,
             "Received vault update"
         );
         
@@ -895,15 +933,15 @@ impl WebSocketClient {
                         
                 // 安全处理（不持有任何锁）
                 for (config, data) in configs_and_data {
-                            info!(pool = %config.name, "Recalculating price after vault update");
-                    
+                    info!(pool = %config.name, "Recalculating price after vault update (slot={})", slot);
+
                     // 🔥 Record vault update stats
                     self.pool_stats.record_vault_update(&config.name);
-                    
-                            if let Ok(pool) = PoolFactory::create_pool(&config.pool_type, &data) {
-                        let slot = 0;
-                                let start_time = Instant::now();
-                                self.update_cache_from_pool(pool.as_ref(), &config, &config.name, slot, start_time);
+
+                    if let Ok(pool) = PoolFactory::create_pool(&config.pool_type, &data) {
+                        let start_time = Instant::now();
+                        // ✅ 修复：传递正确的slot
+                        self.update_cache_from_pool(pool.as_ref(), &config, &config.name, slot, start_time);
                     }
                 }
             }
@@ -941,22 +979,21 @@ impl WebSocketClient {
             }
         };
         
-        // Get pool information using unified interface
-        let price = if base_reserve > 0 && quote_reserve > 0 {
-            let (base_decimals, quote_decimals) = pool.get_decimals();
-            let base_f64 = base_reserve as f64 / 10f64.powi(base_decimals as i32);
-            let quote_f64 = quote_reserve as f64 / 10f64.powi(quote_decimals as i32);
-            // 🚨 Critical fix: Prevent division by zero
-            if base_f64 > 0.0 {
-                quote_f64 / base_f64
-            } else {
-                0.0
+        // 优先使用 DexPool 自带的价格计算（Phoenix等CLOB依赖该值）
+        let mut price = pool.calculate_price();
+
+        if price == 0.0 {
+            // Fallback: 使用储备计算（适用于AMM/CLMM）
+            if base_reserve > 0 && quote_reserve > 0 {
+                let (base_decimals, quote_decimals) = pool.get_decimals();
+                let base_f64 = base_reserve as f64 / 10f64.powi(base_decimals as i32);
+                let quote_f64 = quote_reserve as f64 / 10f64.powi(quote_decimals as i32);
+                // 🚨 Critical fix: Prevent division by zero
+                if base_f64 > 0.0 {
+                    price = quote_f64 / base_f64;
+                }
             }
-        } else {
-            // 🚨 For vault-based pools (SolFi V2, etc.), reserves may be 0 initially
-            // Don't call calculate_price as it might also return 0
-            0.0
-        };
+        }
         
         let (base_decimals, quote_decimals) = pool.get_decimals();
         let dex_name = pool.dex_name();
@@ -1003,9 +1040,52 @@ impl WebSocketClient {
             last_update: Instant::now(),
             slot,  // 🎯 记录slot用于数据一致性
         };
-        
+
         self.price_cache.update_price(pool_price);
-        
+
+        // 🔥 Send price change event to Coordinator
+        // Calculate price change percentage
+        let price_change_percent = if let Some(entry) = self.last_prices.get(pool_name) {
+            let last_price = *entry.value();
+
+            if last_price == 0.0 || price == 0.0 {
+                // Handle zero price case
+                if last_price != price {
+                    1.0 // 100% change (or -100%) for logging/signaling
+                } else {
+                    0.0
+                }
+            } else {
+                let change = ((price - last_price) / last_price * 100.0).abs();
+                if change.is_finite() {
+                    change / 100.0 // Convert to decimal (e.g., 0.15% -> 0.0015)
+                } else {
+                    0.0
+                }
+            }
+        } else {
+            0.01 // First update - treat as 1% change to trigger Coordinator
+        };
+
+        // Send to Coordinator if sender is registered
+        if let Some(tx) = self.coordinator_tx.lock().unwrap().as_ref() {
+            let event = PriceChangeEvent {
+                pool_id: pool_config.address.clone(),
+                pool_name: pool_name.to_string(),
+                pair: pool_name.to_string(), // Assuming pool_name is like "SOL/USDC"
+                price_change_percent,
+                old_price: if price_change_percent > 0.0 { Some(self.last_prices.get(pool_name).map_or(0.0, |v| *v.value())) } else { None },
+                new_price: price,
+                timestamp: Instant::now(),
+            };
+
+            // Use try_send to avoid blocking
+            match tx.try_send(event) {
+                Ok(_) => debug!(pool = %pool_name, "Price change event sent to Coordinator"),
+                Err(e) => warn!(pool = %pool_name, error = %e, "Failed to send event to Coordinator (channel full)"),
+            }
+        }
+
         // 🔥 Check price change and only log if significant
         let should_log = {
             let price_changed = if let Some(entry) = self.last_prices.get(pool_name) {

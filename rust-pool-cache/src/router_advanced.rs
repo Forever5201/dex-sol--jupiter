@@ -122,7 +122,7 @@ impl AdvancedRouter {
         
         let scan_start = tokio::time::Instant::now();
         let paths = self.quick_scanner.find_all_opportunities(amount);
-        println!("   ⚡ Found {} paths in {:?}", paths.len(), scan_start.elapsed());
+        println!("   ⚡ Found {} raw paths in {:?}", paths.len(), scan_start.elapsed());
         
         // 转换为OptimizedPath
         let optimized: Vec<OptimizedPath> = paths.into_iter()
@@ -133,6 +133,17 @@ impl AdvancedRouter {
                 split_strategy: None,
             })
             .collect();
+
+        // 🔍 详细调试日志：打印每一条候选路径及其ROI（过滤前）
+        if !optimized.is_empty() {
+            println!("   📋 Fast scan candidate paths (before ROI filter): {}", optimized.len());
+            for (idx, path) in optimized.iter().enumerate() {
+                println!("   ── Candidate #{} ───────────────", idx + 1);
+                println!("{}", self.format_optimized_path(path));
+            }
+        } else {
+            println!("   ℹ️  Fast scan: no candidate paths found before filtering");
+        }
         
         let before_filter = optimized.len();
         let filtered: Vec<OptimizedPath> = optimized.into_iter()
@@ -228,15 +239,47 @@ impl AdvancedRouter {
         
         let before_filter = base_optimized.len();
         println!("   📋 Total paths before filtering: {}", before_filter);
-        
+
+        // 🔍 🔥 🔥 🔥 增强调试日志：打印所有候选路径（包括将被过滤的）
+        if !base_optimized.is_empty() {
+            println!("   📂 Complete scan candidate paths (before ROI filter): {}", base_optimized.len());
+            for (idx, path) in base_optimized.iter().enumerate() {
+                println!("\n   ════════════════════════════════════════════════");
+                println!("   🎯 候选路径 #{} (ROI: {:.6}%)", idx + 1, path.optimized_roi);
+
+                // 标记是否会被过滤
+                if path.optimized_roi >= self.config.min_roi_percent {
+                    println!("   ✅ 保留 (ROI ≥ {}%阈值)", self.config.min_roi_percent);
+                } else {
+                    println!("   ❌ 将被过滤 (ROI < {}%阈值)", self.config.min_roi_percent);
+                }
+
+                println!("{}", self.format_optimized_path_for_debug(path));
+            }
+            println!("   ════════════════════════════════════════════════\n");
+        } else {
+            println!("   ⚠️  没有在过滤前找到任何候选路径！");
+            println!("   💡 可能原因:");
+            println!("      1. 价格缓存中没有池子数据");
+            println!("      2. 池子数据不足以形成套利路径");
+            println!("      3. 路由算法没有正确扫描");
+        }
+
         // Filter by ROI threshold
         let filtered: Vec<OptimizedPath> = base_optimized.into_iter()
             .filter(|p| p.optimized_roi >= self.config.min_roi_percent)
             .collect();
-        
+
         let filtered_out = before_filter - filtered.len();
         if filtered_out > 0 {
-            println!("   ⛔ Filtered out {} paths (ROI < {}%)", filtered_out, self.config.min_roi_percent);
+            println!("   ⛔ 过滤结果: {} 条路径中，{} 条因 ROI < {}% 被移除", before_filter, filtered_out, self.config.min_roi_percent);
+            if !filtered.is_empty() {
+                println!("   ✅ 最终保留: {} 条路径", filtered.len());
+            } else {
+                println!("   ⚠️  警告: 过滤后没有路径剩余！");
+            }
+        } else if before_filter > 0 {
+            println!("   ✅ 过滤结果: 所有 {} 条路径都满足 ROI ≥ {}% 阈值", before_filter, self.config.min_roi_percent);
         }
         
         // 应用拆分优化
@@ -309,7 +352,7 @@ impl AdvancedRouter {
                 output.push_str(&format!("     - 路径{}: {:.2} 资金\n", idx + 1, amount));
             }
         }
-        
+
         output.push_str(&format!("   路径（{}跳）:\n", path.base_path.steps.len()));
         for (idx, step) in path.base_path.steps.iter().enumerate() {
             output.push_str(&format!("     {}. [{}] {} → {} (价格: {:.6})\n",
@@ -319,10 +362,67 @@ impl AdvancedRouter {
                 step.output_token,
                 step.price));
         }
-        
+
         output
     }
-    
+
+    /// 🔥 调试专用：格式化优化后的路径（显示更多细节）
+    fn format_optimized_path_for_debug(&self, path: &OptimizedPath) -> String {
+        let mut output = String::new();
+
+        output.push_str(&format!("   📊 路径类型: {:?}\n", path.base_path.arb_type));
+        output.push_str(&format!("   💰 初始投入: {:.6} {}\n",
+            path.base_path.input_amount,
+            path.base_path.start_token));
+        output.push_str(&format!("   💵 最终获得: {:.6} {}\n",
+            path.base_path.output_amount,
+            path.base_path.end_token));
+        output.push_str(&format!("   📈 毛利润: {:.6} {}\n",
+            path.base_path.gross_profit,
+            path.base_path.start_token));
+        output.push_str(&format!("   💸 估算费用: {:.6} {}\n",
+            path.base_path.estimated_fees,
+            path.base_path.start_token));
+        output.push_str(&format!("   🎯 净利润: {:.6} {}\n",
+            path.base_path.net_profit,
+            path.base_path.start_token));
+        output.push_str(&format!("   📊 ROI: {:.6}%\n", path.optimized_roi));
+
+        // 显示有效性检查
+        output.push_str(&format!("   ✅ 有效性检查:"));
+        output.push_str(&format!(" 循环路径: {}", if path.base_path.start_token == path.base_path.end_token { "✓" } else { "✗" }));
+        output.push_str(&format!(" 净利润>0: {}", if path.base_path.net_profit > 0.0 { "✓" } else { "✗" }));
+        output.push_str(&format!(" ROI≥{}%: {}", self.config.min_roi_percent, if path.optimized_roi >= self.config.min_roi_percent { "✓" } else { "✗" }));
+        output.push_str(&format!(" 跳数合理: {}\n", if path.base_path.steps.len() >= 2 && path.base_path.steps.len() <= 6 { "✓" } else { "✗" }));
+
+        // 显示每条步骤的详细信息
+        output.push_str(&format!("   🛣️  路径详情 ({}跳):\n", path.base_path.steps.len()));
+        for (idx, step) in path.base_path.steps.iter().enumerate() {
+            output.push_str(&format!("\n   [{}/{}] [{}]\n",
+                idx + 1,
+                path.base_path.steps.len(),
+                step.dex_name));
+            output.push_str(&format!("        输入: {:.6} {}\n", step.expected_input, step.input_token));
+            output.push_str(&format!("        输出: {:.6} {}\n", step.expected_output, step.output_token));
+            output.push_str(&format!("        价格: {:.6}\n", step.price));
+            output.push_str(&format!("        池子: {}\n", step.pool_id));
+            output.push_str(&format!("        流动性: base={:.2}, quote={:.2}\n",
+                step.liquidity_base as f64 / 1e6,
+                step.liquidity_quote as f64 / 1e6));
+        }
+
+        // 如果启用了拆分策略，显示拆分详情
+        if let Some(strategy) = &path.split_strategy {
+            output.push_str(&format!("\n   💎 拆分优化策略:\n"));
+            output.push_str(&format!("      总路径数: {}\n", strategy.allocations.len()));
+            for (idx, amount) in &strategy.allocations {
+                output.push_str(&format!("      - 路径{}: {:.2} USD\n", idx + 1, amount));
+            }
+        }
+
+        output
+    }
+
     /// 选择最优路径
     pub fn select_best<'a>(&self, paths: &'a [OptimizedPath]) -> Option<&'a OptimizedPath> {
         paths.iter()

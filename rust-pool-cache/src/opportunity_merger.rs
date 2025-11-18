@@ -4,7 +4,6 @@
 
 use crate::router::ArbitragePath;
 use crate::lst_enhanced_detector::LstOpportunity;
-use std::collections::HashSet;
 use tracing::debug;
 
 #[derive(Debug, Clone)]
@@ -13,9 +12,6 @@ pub struct UnifiedOpportunity {
     pub roi: f64,
     pub net_profit: f64,
     pub description: String,
-    pub token_sequence: Vec<String>,
-    pub pool_ids: HashSet<String>,
-    pub raw_data: OpportunityData,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,41 +20,24 @@ pub enum OpportunitySource {
     LstDetector,
 }
 
-#[derive(Debug, Clone)]
-pub enum OpportunityData {
-    General(ArbitragePath),
-    Lst(LstOpportunity),
-}
-
 impl UnifiedOpportunity {
     pub fn from_arbitrage_path(path: ArbitragePath) -> Self {
-        let token_sequence = path.steps.iter().map(|s| s.output_token.clone()).collect();
-        let pool_ids = path.steps.iter().map(|s| s.pool_id.clone()).collect();
         let description = format!("{} → {}", path.start_token, path.end_token);
-        
+
         Self {
             source: OpportunitySource::GeneralRouter,
             roi: path.roi_percent,
             net_profit: path.net_profit,
             description,
-            token_sequence,
-            pool_ids,
-            raw_data: OpportunityData::General(path),
         }
     }
     
     pub fn from_lst_opportunity(opp: LstOpportunity) -> Self {
-        let token_sequence = Vec::new();
-        let pool_ids = HashSet::new();
-        
         Self {
             source: OpportunitySource::LstDetector,
             roi: opp.estimated_profit_percent,
             net_profit: opp.output_amount - opp.input_amount,
             description: opp.path_description.clone(),
-            token_sequence,
-            pool_ids,
-            raw_data: OpportunityData::Lst(opp),
         }
     }
     

@@ -10,19 +10,21 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { Keypair, PublicKey, VersionedTransaction } from '@solana/web3.js';
-import { 
+import {
   ConnectionPool,
   KeypairManager,
   TransactionBuilder,
   ConfigLoader,
   createEconomicsSystem,
-  createLogger
+  createLogger,
+  PriorityFeeEstimator
 } from '@solana-arb-bot/core';
 import type { CostConfig, RiskCheckConfig, ArbitrageOpportunity } from '@solana-arb-bot/core';
 import { MarketScanner, Market } from './market-scanner';
 import { ArbitrageEngine } from './arbitrage-engine';
 import { SpamExecutor } from './executors/spam-executor';
 import { JitoExecutor } from './executors/jito-executor';
+import { SimulationExecutor } from './executors/simulation-executor';
 import TOML from 'toml';
 import fs from 'fs';
 
@@ -58,7 +60,7 @@ interface BotConfig {
     max_slippage: number;
   };
   execution: {
-    mode: 'spam' | 'jito';
+    mode: 'spam' | 'jito' | 'simulation';
     skip_preflight: boolean;
     max_retries: number;
     jito_block_engine_url?: string;
@@ -121,9 +123,11 @@ class OnChainBot {
   private arbitrageEngine!: ArbitrageEngine;
   private spamExecutor?: SpamExecutor;
   private jitoExecutor?: JitoExecutor;
+  private simulationExecutor?: SimulationExecutor;
   private economics!: ReturnType<typeof createEconomicsSystem>;
-  private executionMode: 'spam' | 'jito';
-  
+  private priorityFeeEstimator!: PriorityFeeEstimator;
+  private executionMode: 'spam' | 'jito' | 'simulation';
+
   private isRunning: boolean = false;
   private scanCount: number = 0;
   private opportunityCount: number = 0;
@@ -220,14 +224,22 @@ class OnChainBot {
         },
       });
 
-      // 7. 创建执行器（根据模式）
+      // 7. 初始化优先费估算器
+      logger.info('Initializing Priority Fee Estimator...');
+      this.priorityFeeEstimator = new PriorityFeeEstimator(
+        this.connectionPool.getBestConnection(),
+        1_000_000 // 默认100万计算单元，稍后会根据协议调整
+      );
+      logger.info('✅ Priority Fee Estimator initialized');
+
+      // 8. 创建执行器（根据模式）
       if (this.executionMode === 'jito') {
         logger.info('Initializing Jito executor...');
-        
+
         if (!this.config.execution.jito_block_engine_url) {
           throw new Error('Jito mode requires jito_block_engine_url in config');
         }
-        
+
         this.jitoExecutor = new JitoExecutor(
           this.connectionPool.getBestConnection(),
           this.keypair,
@@ -242,16 +254,30 @@ class OnChainBot {
             confirmationTimeout: this.config.execution.confirmation_timeout_ms,
           }
         );
-        
+
         logger.info('✅ Jito executor initialized');
+      } else if (this.executionMode === 'simulation') {
+        logger.info('Initializing Simulation executor...');
+
+        this.simulationExecutor = new SimulationExecutor(
+          this.connectionPool.getBestConnection(),
+          {
+            enabled: true,
+            logComputeUnits: true,
+            logProfit: true,
+            verifySignatures: false,
+          }
+        );
+
+        logger.info('✅ Simulation executor initialized');
       } else {
         logger.info('Initializing Spam executor...');
-        
+
         this.spamExecutor = new SpamExecutor(this.connectionPool, {
           skipPreflight: this.config.execution.skip_preflight,
           maxRetries: this.config.execution.max_retries,
         });
-        
+
         logger.info('✅ Spam executor initialized');
       }
 
@@ -402,7 +428,7 @@ class OnChainBot {
           opportunity.poolLiquidity || 0,
           opportunity.grossProfit
         ) || 0.5;
-        
+
         // 计算最优小费
         jitoTip = await this.economics.jitoTipOptimizer.calculateOptimalTip(
           opportunity.grossProfit,
@@ -411,13 +437,19 @@ class OnChainBot {
           this.config.economics.capital_size
         );
       }
-      
-      const costs = this.economics.costCalculator.calculateTotalCost(costConfig, jitoTip);
+
+      // 更新成本配置以包含优先费
+      const priorityFeeBasedCost = {
+        ...costConfig,
+        computeUnitPrice: priorityFeeEstimate.feePerCU // Use the estimated priority fee
+      };
+
+      const costs = this.economics.costCalculator.calculateTotalCost(priorityFeeBasedCost, jitoTip);
 
       // 4. 利润分析
       const analysis = this.economics.profitAnalyzer.analyzeProfitability(
         opportunity,
-        costConfig,
+        priorityFeeBasedCost,
         jitoTip
       );
 
@@ -482,129 +514,211 @@ class OnChainBot {
     try {
       logger.info(`🚀 Executing arbitrage: ${opportunity.tokenPair}`);
 
-      // 1. 构建真实的Swap交易（使用Jupiter）
-      logger.info('Building real swap transactions via Jupiter...');
-      
-      // 解析代币地址
-      const inputMint = new PublicKey(opportunity.inputMint);
-      const middleMint = new PublicKey(opportunity.route[0] || opportunity.outputMint);
-      const outputMint = new PublicKey(opportunity.outputMint);
-      
-      // 计算滑点容差（basis points）
-      const slippageBps = Math.floor(this.config.arbitrage.max_slippage * 10000);
-      
-      // 第一跳：inputMint → middleMint
-      logger.debug(`Swap 1: ${inputMint.toBase58().slice(0, 8)}... → ${middleMint.toBase58().slice(0, 8)}...`);
-      // TODO: Implement real swap transaction builder
-      const swap1Result = {
-        dexes: ['Raydium'],
-        priceImpact: 0.5,
-        outputAmount: opportunity.inputAmount * 1.01,
-        signedTransaction: Buffer.from([]) // Placeholder
-      };
-      
-      logger.info(
-        `Swap 1: ${swap1Result.dexes.join(',')} | ` +
-        `Impact: ${swap1Result.priceImpact.toFixed(3)}% | ` +
-        `Output: ${(swap1Result.outputAmount / 1e9).toFixed(6)}`
-      );
-      
-      // 第二跳：middleMint → outputMint
-      logger.debug(`Swap 2: ${middleMint.toBase58().slice(0, 8)}... → ${outputMint.toBase58().slice(0, 8)}...`);
-      // TODO: Implement real swap transaction builder
-      const swap2Result = {
-        dexes: ['Orca'],
-        priceImpact: 0.5,
-        outputAmount: swap1Result.outputAmount * 1.01,
-        signedTransaction: Buffer.from([]) // Placeholder
-      };
-      
-      logger.info(
-        `Swap 2: ${swap2Result.dexes.join(',')} | ` +
-        `Impact: ${swap2Result.priceImpact.toFixed(3)}% | ` +
-        `Output: ${(swap2Result.outputAmount / 1e9).toFixed(6)}`
-      );
-      
-      // 验证最终利润
-      const finalProfit = swap2Result.outputAmount - opportunity.inputAmount;
-      const totalImpact = swap1Result.priceImpact + swap2Result.priceImpact;
-      
-      logger.info(
-        `Final: Profit=${(finalProfit / 1e9).toFixed(6)} SOL, ` +
-        `TotalImpact=${totalImpact.toFixed(3)}%`
-      );
-      
-      // 如果价格影响过大或利润变负，放弃执行
-      if (totalImpact > 5.0) {
-        logger.warn(`⚠️ Price impact too high (${totalImpact.toFixed(2)}%), aborting`);
-        return;
-      }
-      
-      if (finalProfit < expectedProfit * 0.5) {
-        logger.warn(`⚠️ Profit too low after quotes (${(finalProfit / 1e9).toFixed(6)} SOL), aborting`);
+      // 从scanner中获取市场信息以确定池子类型
+      const market1 = this.scanner.findMarket(opportunity.inputMint, opportunity.outputMint);
+      const market2 = this.scanner.findMarket(opportunity.outputMint, opportunity.inputMint);
+
+      // 如果找不到市场，尝试通过机会中的路由信息获取
+      if (!market1 || !market2) {
+        logger.warn(`Could not find market info for token pair: ${opportunity.tokenPair}`);
         return;
       }
 
+      // 获取价格数据以构建交易
+      const priceData1 = this.scanner.getPrice(market1.poolAddress);
+      const priceData2 = this.scanner.getPrice(market2.poolAddress);
+
+      if (!priceData1 || !priceData2) {
+        logger.warn(`Missing price data for markets: ${market1.poolAddress}, ${market2.poolAddress}`);
+        return;
+      }
+
+      // 使用Builder Factory来选择适当的交易构建器
+      const { BuilderFactory } = await import('./builders/builder-factory');
+      const builder1 = BuilderFactory.getBuilder(priceData1);
+      const builder2 = BuilderFactory.getBuilder(priceData2);
+
+      if (!builder1 || !builder2) {
+        logger.warn(`Could not find appropriate builders for markets: ${priceData1?.dex} -> ${priceData2?.dex}`);
+        return;
+      }
+
+      // 使用优先费估算器获取当前优先费
+      logger.info('Estimating priority fee...');
+      const priorityFeeEstimate = await this.priorityFeeEstimator.estimateOptimalFee(
+        opportunity.grossProfit,
+        'high' // 对于套利交易使用高优先级
+      );
+
+      logger.info(
+        `Priority fee estimate: ${priorityFeeEstimate.feePerCU} micro-lamports/CU, ` +
+        `Total: ${priorityFeeEstimate.totalFee} lamports`
+      );
+
+      // 计算最小输出金额（考虑滑点）
+      const minOutput1 = opportunity.inputAmount * (1 - this.config.arbitrage.max_slippage);
+      const minOutput2 = opportunity.expectedOutput * (1 - this.config.arbitrage.max_slippage);
+
+      // 构建两个Swap交易
+      const { default: BN } = await import('bn.js');
+      const inputAmount = new BN(opportunity.inputAmount);
+      const minOutputAmount1 = new BN(minOutput1);
+      const minOutputAmount2 = new BN(minOutput2);
+
+      // 构建第一笔交易
+      logger.info('Building first swap transaction...');
+      const swap1Tx = await builder1.buildSwap(
+        priceData1,
+        inputAmount,
+        minOutputAmount1,
+        this.keypair.publicKey,
+        priorityFeeEstimate.feePerCU // Pass the priority fee
+      );
+
+      // 设置计算单元限制和价格
+      const { ComputeBudgetProgram } = await import('@solana/web3.js');
+      const computeUnitLimitIx1 = ComputeBudgetProgram.setComputeUnitLimit({
+        units: builder1.getComputeUnitLimit(priceData1),
+      });
+
+      const computeUnitPriceIx1 = ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: priorityFeeEstimate.feePerCU,
+      });
+
+      logger.info('Building second swap transaction...');
+      const swap2Tx = await builder2.buildSwap(
+        priceData2,
+        new BN(opportunity.expectedOutput),
+        new BN(opportunity.inputAmount), // Minimum expected to return to original amount
+        this.keypair.publicKey,
+        priorityFeeEstimate.feePerCU // Pass the priority fee
+      );
+
+      // 设置计算单元限制和价格
+      const computeUnitLimitIx2 = ComputeBudgetProgram.setComputeUnitLimit({
+        units: builder2.getComputeUnitLimit(priceData2),
+      });
+
+      const computeUnitPriceIx2 = ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: priorityFeeEstimate.feePerCU,
+      });
+
+      // 将指令转换为版本化交易
+      const { TransactionBuilder } = await import('@solana-arb-bot/core');
+      const connection = this.connectionPool.getBestConnection();
+
+      // 构建第一笔版本化交易（包含优先费指令）
+      const swap1VersionedTx = await TransactionBuilder.createVersionedTransaction(
+        connection,
+        [computeUnitLimitIx1, computeUnitPriceIx1, swap1Tx],
+        this.keypair.publicKey
+      );
+
+      // 构建第二笔版本化交易（包含优先费指令）
+      const swap2VersionedTx = await TransactionBuilder.createVersionedTransaction(
+        connection,
+        [computeUnitLimitIx2, computeUnitPriceIx2, swap2Tx],
+        this.keypair.publicKey
+      );
+
+      logger.info('✅ Transactions built successfully');
+
       // 2. 执行交易（根据模式）
       let result;
-      
-      if (this.executionMode === 'jito' && this.jitoExecutor) {
+
+      if (this.executionMode === 'simulation' && this.simulationExecutor) {
+        logger.info('🧪 Simulating arbitrage execution...');
+
+        // 执行模拟
+        const simulationResults = await this.simulationExecutor.simulateBundle(
+          [swap1VersionedTx, swap2VersionedTx],
+          this.keypair.publicKey
+        );
+
+        // 检查模拟结果
+        const allSuccessful = simulationResults.every(r => r.success);
+        if (allSuccessful) {
+          logger.info(`✅ Simulation Success (Profit: ${(expectedProfit / 1e9).toFixed(6)} SOL, CU: ${simulationResults[0]?.computeUnits || 0})`);
+
+          // 如果有第二笔交易的计算单元数据，也打印出来
+          if (simulationResults[1]?.computeUnits) {
+            logger.info(`✅ Simulation Success (Profit: ${(expectedProfit / 1e9).toFixed(6)} SOL, CU: ${simulationResults[1]?.computeUnits || 0})`);
+          }
+
+          result = {
+            success: true,
+            signature: 'simulated_success'
+          };
+        } else {
+          logger.error('❌ Simulation Failed');
+          simulationResults.forEach((r, i) => {
+            if (!r.success) {
+              logger.error(`❌ Simulation failed for transaction ${i + 1}: ${r.error}`);
+            }
+          });
+
+          result = {
+            success: false,
+            error: simulationResults.map(r => r.error).filter(Boolean).join('; ')
+          };
+        }
+      } else if (this.executionMode === 'jito' && this.jitoExecutor) {
         logger.info(`🚀 Executing via Jito (Tip: ${(jitoTip / 1e9).toFixed(6)} SOL)`);
-        
+
         // 评估竞争强度
         const competition = this.jitoExecutor.assessCompetition(
           opportunity.poolLiquidity || 0,
           opportunity.grossProfit
         );
-        
+
         // 执行第一笔交易
         result = await this.jitoExecutor.executeVersionedTransaction(
-          swap1Result.signedTransaction as any, // TODO: Fix type
+          swap1VersionedTx,
           expectedProfit,
           competition,
           0.8 // 高紧迫性
         );
-        
+
         if (!result.success) {
           logger.error(`❌ Swap 1 failed: ${result.error}`);
           throw new Error(`Swap 1 failed: ${result.error}`);
         }
-        
+
         logger.info(`✅ Swap 1 landed! Signature: ${result.signature}`);
-        
+
         // 等待确认（简单等待，生产环境应该监听确认）
         await this.sleep(2000);
-        
+
         // 执行第二笔交易
         result = await this.jitoExecutor.executeVersionedTransaction(
-          swap2Result.signedTransaction as any, // TODO: Fix type
+          swap2VersionedTx,
           expectedProfit,
           competition,
           0.9 // 更高紧迫性
         );
-        
+
       } else if (this.spamExecutor) {
         logger.info('🚀 Executing via RPC Spam');
-        
+
         // Spam模式：执行第一笔
         result = await this.spamExecutor.executeVersionedTransaction(
-          swap1Result.signedTransaction as any, // TODO: Fix type
+          swap1VersionedTx,
           expectedProfit
         );
-        
+
         if (!result.success) {
           logger.error(`❌ Swap 1 failed: ${result.error}`);
           throw new Error(`Swap 1 failed: ${result.error}`);
         }
-        
+
         logger.info(`✅ Swap 1 confirmed! Signature: ${result.signature}`);
-        
+
         // 等待确认
         await this.sleep(2000);
-        
+
         // 执行第二笔
         result = await this.spamExecutor.executeVersionedTransaction(
-          swap2Result.signedTransaction as any, // TODO: Fix type
+          swap2VersionedTx,
           expectedProfit
         );
       } else {
@@ -622,7 +736,7 @@ class OnChainBot {
       }
     } catch (error) {
       logger.error(`Execution error: ${error}`);
-      
+
       // 记录失败
       this.economics.circuitBreaker.recordTransaction({
         success: false,
@@ -716,6 +830,7 @@ async function main() {
   // 解析命令行参数
   const args = process.argv.slice(2);
   let configPath = 'packages/onchain-bot/config.example.toml';
+  let simulateMode = false;
 
   // 方式1：直接传配置文件路径（第一个参数）
   if (args.length > 0 && !args[0].startsWith('-')) {
@@ -727,17 +842,27 @@ async function main() {
     if (args[i] === '--config' || args[i] === '-c') {
       configPath = args[i + 1];
       i++;
+    } else if (args[i] === '--simulate' || args[i] === '-s') {
+      simulateMode = true;
     }
   }
 
   logger.info('🎯 ========== On-Chain Arbitrage Bot ==========');
   logger.info(`Version: 1.0.0 MVP`);
   logger.info(`Config: ${configPath}`);
+  logger.info(`Simulate Mode: ${simulateMode}`);
   logger.info('');
 
   try {
     // 创建并初始化Bot
     const bot = new OnChainBot(configPath);
+
+    // 如果使用模拟模式，覆盖配置中的执行模式
+    if (simulateMode) {
+      (bot as any).executionMode = 'simulation';
+      logger.info('🔧 Execution mode set to SIMULATION via CLI flag');
+    }
+
     await bot.initialize();
 
     // 处理退出信号

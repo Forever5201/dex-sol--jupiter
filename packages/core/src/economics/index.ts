@@ -7,6 +7,7 @@ export { JitoTipOptimizer, type JitoTipOptimizerConfig } from './jito-tip-optimi
 export { ProfitAnalyzer, type ProfitAnalyzerConfig } from './profit-analyzer';
 export { RiskManager } from './risk-manager';
 export { CircuitBreaker, type ExtendedCircuitBreakerConfig } from './circuit-breaker';
+export { TickArraySimulator, type TickData, type TickArray, type CrossTickSimulationResult } from './tick-array-simulator';
 
 // Re-export factory function
 export { createEconomicsSystem } from './factory';
